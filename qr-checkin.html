@@ -117,16 +117,19 @@
   <footer>
     <div id="status">QRコードを枠の中にかざしてください</div>
     <div id="debug" style="font-size:12px;color:#5b6c8f;margin-top:6px;"></div>
+    <div id="settings-link" style="font-size:12px;color:#3d4d70;margin-top:10px;">⚙ 設定</div>
   </footer>
 </div>
 
 <script>
-// ===== 設定：ここを書き換えてから使ってください =====
-const WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwQLpY39eup0BKLIN7h4cfNmehMTNXBMFX4b77d3eeRi_1S7xTbYz72FgTp84vJnJyd/exec"; // Apps ScriptのウェブアプリURL
-const BRANCH_NAME = "春日部校"; // このタブレットが置いてある校舎名
+// ===== 設定：Webhook URLと校舎名は、URLではなくこの端末のlocalStorageに保存します =====
+// （URLのクエリパラメータに乗せると、外部フォント/ライブラリ読み込み時のReferer情報や
+// ブラウザ履歴・アドレスバー経由で漏れる可能性があるため、あえてlocalStorageにしています）
+const STORAGE_KEY_WEBHOOK = 'smilestudy_webhook_url';
+const STORAGE_KEY_BRANCH = 'smilestudy_branch_name';
+let WEBHOOK_URL = '';
+let BRANCH_NAME = '';
 // ====================================================
-
-document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -217,6 +220,45 @@ function handleScan(data){
 }
 
 // ----- 画面: 出勤/退勤の選択 -----
+// ----- 画面: 初期設定（Webhook URL・校舎名をこの端末に保存） -----
+function showSetupForm(){
+  const existingWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK) || '';
+  const existingBranch = localStorage.getItem(STORAGE_KEY_BRANCH) || '春日部校';
+
+  ovTeacherEl.textContent = '初期設定';
+  ovBodyEl.innerHTML = `
+    <label class="ov-label">Webhook URL（Apps ScriptのウェブアプリURL）</label>
+    <input type="text" class="ov-input" id="in-webhook" value="${existingWebhook}"
+      placeholder="https://script.google.com/macros/s/.../exec" style="font-size:14px;">
+    <label class="ov-label">校舎名</label>
+    <input type="text" class="ov-input" id="in-branch" value="${existingBranch}">
+    <div class="ov-error" id="err-setup"></div>
+    <div class="ov-actions">
+      <button class="btn btn-primary" id="btn-save-setup">保存してはじめる</button>
+    </div>
+  `;
+  openOverlay();
+  document.getElementById('btn-save-setup').onclick = () => {
+    const webhook = document.getElementById('in-webhook').value.trim();
+    const branch = document.getElementById('in-branch').value.trim();
+    if (!webhook.startsWith('https://')){
+      document.getElementById('err-setup').textContent = 'Webhook URLが正しくありません（https://で始まるURLを入力してください）';
+      return;
+    }
+    if (!branch){
+      document.getElementById('err-setup').textContent = '校舎名を入力してください';
+      return;
+    }
+    localStorage.setItem(STORAGE_KEY_WEBHOOK, webhook);
+    localStorage.setItem(STORAGE_KEY_BRANCH, branch);
+    WEBHOOK_URL = webhook;
+    BRANCH_NAME = branch;
+    document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
+    overlayEl.classList.remove('show');
+    startCamera();
+  };
+}
+
 function showChoose(){
   ovTeacherEl.textContent = currentTeacher.name + ' 先生';
   ovBodyEl.innerHTML = `
@@ -406,7 +448,21 @@ function fmtTime(date){
   return date.toLocaleTimeString('ja-JP', {hour12:false});
 }
 
-startCamera();
+const savedWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK);
+const savedBranch = localStorage.getItem(STORAGE_KEY_BRANCH);
+if (savedWebhook && savedBranch){
+  WEBHOOK_URL = savedWebhook;
+  BRANCH_NAME = savedBranch;
+  document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
+  startCamera();
+} else {
+  showSetupForm();
+}
+
+document.getElementById('settings-link').onclick = () => {
+  scanning = false;
+  showSetupForm();
+};
 </script>
 </body>
 </html>
