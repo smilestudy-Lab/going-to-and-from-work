@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>出退勤 打刻</title>
+<title>スマイルスタディ 出退勤</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
@@ -48,19 +48,22 @@
   @keyframes pulse{ 0%,100%{opacity:.5;} 50%{opacity:1;} }
   footer{ padding:28px 24px 40px; text-align:center; position:relative; z-index:2; }
   #status{ font-size:20px; color:var(--muted); }
+  #debug{ font-size:12px; color:#5b6c8f; margin-top:6px; min-height:16px; }
+  #settings-link{ font-size:12px; color:#3d4d70; margin-top:10px; cursor:pointer; }
   #camera-error{ display:none; position:absolute; inset:0; background:var(--bg); z-index:5; align-items:center; justify-content:center; text-align:center; padding:40px; font-size:18px; color:var(--muted); }
 
-  /* ===== オーバーレイ（選択・入力・結果画面） ===== */
+  /* ===== オーバーレイ（設定・選択・入力・結果画面） ===== */
   #overlay{
     position:absolute; inset:0; z-index:10;
     display:none;
     align-items:center; justify-content:center;
-    background:rgba(10,16,32,.72);
+    background:rgba(10,16,32,.78);
     backdrop-filter:blur(2px);
   }
   #overlay.show{ display:flex; }
   .card{
     width:min(90vw,520px);
+    max-height:88vh; overflow-y:auto;
     background:var(--panel);
     border-radius:24px;
     padding:36px 32px;
@@ -74,6 +77,8 @@
     background:#0f1a30; color:var(--paper); font-variant-numeric:tabular-nums;
   }
   .ov-input:focus{ outline:2px solid var(--gold); }
+  .ov-check{ display:flex; align-items:center; gap:10px; margin-top:20px; font-size:16px; }
+  .ov-check input{ width:22px; height:22px; }
   .ov-actions{ display:flex; gap:12px; margin-top:26px; }
   .btn{
     flex:1; padding:18px; border:none; border-radius:14px; font-size:18px; font-weight:700;
@@ -95,7 +100,7 @@
 <body>
 <div id="app">
   <header>
-    <div class="brand">スマイルスタディ<span id="branch-label"></span></div>
+    <div class="brand">スマイルスタディ<span id="branch-label">出退勤</span></div>
     <div class="clock" id="clock">--:--:--</div>
   </header>
   <main>
@@ -105,7 +110,7 @@
       <div class="corner tl"></div><div class="corner tr"></div>
       <div class="corner bl"></div><div class="corner br"></div>
     </div>
-    <div id="camera-error"><div>カメラを起動できませんでした。<br>タブレットの設定でカメラの許可を確認してください。</div></div>
+    <div id="camera-error"><div id="camera-error-msg">カメラを起動できませんでした。<br>タブレットの設定でカメラの許可を確認してください。</div></div>
 
     <div id="overlay">
       <div class="card">
@@ -116,48 +121,65 @@
   </main>
   <footer>
     <div id="status">QRコードを枠の中にかざしてください</div>
-    <div id="debug" style="font-size:12px;color:#5b6c8f;margin-top:6px;"></div>
-    <div id="settings-link" style="font-size:12px;color:#3d4d70;margin-top:10px;">⚙ 設定</div>
+    <div id="debug"></div>
+    <div id="settings-link">&#9881; 設定</div>
   </footer>
 </div>
 
 <script>
-// ===== 設定：Webhook URLと校舎名は、URLではなくこの端末のlocalStorageに保存します =====
-// （URLのクエリパラメータに乗せると、外部フォント/ライブラリ読み込み時のReferer情報や
-// ブラウザ履歴・アドレスバー経由で漏れる可能性があるため、あえてlocalStorageにしています）
+'use strict';
+
+// =====================================================================
+// 設定はこのファイルには書きません。
+// Webhook URLと校舎名は、初回起動時の「初期設定」画面で入力してもらい、
+// この端末のlocalStorageにだけ保存されます。
+// （URLやファイルに書かないので、このファイルはGitHub等に公開しても安全です）
+// =====================================================================
 const STORAGE_KEY_WEBHOOK = 'smilestudy_webhook_url';
 const STORAGE_KEY_BRANCH = 'smilestudy_branch_name';
 let WEBHOOK_URL = '';
 let BRANCH_NAME = '';
-// ====================================================
 
+// ----- DOM参照 -----
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const statusEl = document.getElementById('status');
+const debugEl = document.getElementById('debug');
 const frameEl = document.getElementById('frame');
 const cameraErrorEl = document.getElementById('camera-error');
+const cameraErrorMsgEl = document.getElementById('camera-error-msg');
 const overlayEl = document.getElementById('overlay');
 const ovTeacherEl = document.getElementById('ov-teacher');
 const ovBodyEl = document.getElementById('ov-body');
 
-let scanning = true;
+// ----- 状態 -----
+let scanning = false;
+let cameraStarted = false;
 let frameCount = 0;
-const debugEl = document.getElementById('debug');
 let currentTeacher = null; // { id, name }
 let scanTime = null;       // QRを読み取った瞬間のDate
 
+// ----- 時計 -----
 function updateClock(){
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('ja-JP', {hour12:false});
 }
 setInterval(updateClock, 1000);
 updateClock();
 
+// =====================================================================
+// カメラ・QRスキャン
+// =====================================================================
 async function startCamera(){
   if (typeof jsQR === 'undefined'){
-    debugEl.textContent = 'エラー：QR読み取りライブラリが読み込めていません（通信環境を確認してください）';
+    cameraErrorMsgEl.innerHTML = 'QR読み取りライブラリの読み込みに失敗しました。<br>インターネット接続を確認して、ページを再読み込みしてください。';
     cameraErrorEl.style.display = 'flex';
-    cameraErrorEl.querySelector('div').innerHTML = 'QR読み取りライブラリの読み込みに失敗しました。<br>タブレットのインターネット接続を確認してください。';
+    debugEl.textContent = 'エラー：jsQRライブラリ未読み込み';
+    return;
+  }
+
+  if (cameraStarted){
+    scanning = true;
     return;
   }
 
@@ -173,8 +195,10 @@ async function startCamera(){
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
       await video.play();
-      debugEl.textContent = 'カメラ起動OK。QRを探しています…';
+      cameraStarted = true;
+      scanning = true;
       frameCount = 0;
+      debugEl.textContent = 'カメラ起動OK。QRを探しています…';
       requestAnimationFrame(tick);
       return;
     } catch(err){
@@ -182,8 +206,8 @@ async function startCamera(){
     }
   }
 
-  debugEl.textContent = 'カメラ起動エラー：' + (lastErr ? (lastErr.name + ' ' + lastErr.message) : '不明なエラー');
   cameraErrorEl.style.display = 'flex';
+  debugEl.textContent = 'カメラ起動エラー：' + (lastErr ? (lastErr.name + ' ' + lastErr.message) : '不明');
 }
 
 function tick(){
@@ -219,25 +243,30 @@ function handleScan(data){
   showChoose();
 }
 
-// ----- 画面: 出勤/退勤の選択 -----
-// ----- 画面: 初期設定（Webhook URL・校舎名をこの端末に保存） -----
+// =====================================================================
+// 画面: 初期設定（Webhook URL・校舎名をこの端末に保存）
+// =====================================================================
 function showSetupForm(){
   const existingWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK) || '';
   const existingBranch = localStorage.getItem(STORAGE_KEY_BRANCH) || '春日部校';
 
+  scanning = false;
   ovTeacherEl.textContent = '初期設定';
   ovBodyEl.innerHTML = `
     <label class="ov-label">Webhook URL（Apps ScriptのウェブアプリURL）</label>
-    <input type="text" class="ov-input" id="in-webhook" value="${existingWebhook}"
-      placeholder="https://script.google.com/macros/s/.../exec" style="font-size:14px;">
+    <input type="text" class="ov-input" id="in-webhook" placeholder="https://script.google.com/macros/s/.../exec" style="font-size:14px;">
     <label class="ov-label">校舎名</label>
-    <input type="text" class="ov-input" id="in-branch" value="${existingBranch}">
+    <input type="text" class="ov-input" id="in-branch">
     <div class="ov-error" id="err-setup"></div>
     <div class="ov-actions">
       <button class="btn btn-primary" id="btn-save-setup">保存してはじめる</button>
     </div>
   `;
+  // 値はinnerHTMLに直接埋め込まず、プロパティ経由でセット（HTML崩れ防止）
+  document.getElementById('in-webhook').value = existingWebhook;
+  document.getElementById('in-branch').value = existingBranch;
   openOverlay();
+
   document.getElementById('btn-save-setup').onclick = () => {
     const webhook = document.getElementById('in-webhook').value.trim();
     const branch = document.getElementById('in-branch').value.trim();
@@ -251,14 +280,21 @@ function showSetupForm(){
     }
     localStorage.setItem(STORAGE_KEY_WEBHOOK, webhook);
     localStorage.setItem(STORAGE_KEY_BRANCH, branch);
-    WEBHOOK_URL = webhook;
-    BRANCH_NAME = branch;
-    document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
-    overlayEl.classList.remove('show');
+    applyConfig(webhook, branch);
+    closeOverlay();
     startCamera();
   };
 }
 
+function applyConfig(webhook, branch){
+  WEBHOOK_URL = webhook;
+  BRANCH_NAME = branch;
+  document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
+}
+
+// =====================================================================
+// 画面: 出勤/退勤の選択
+// =====================================================================
 function showChoose(){
   ovTeacherEl.textContent = currentTeacher.name + ' 先生';
   ovBodyEl.innerHTML = `
@@ -278,7 +314,9 @@ function showChoose(){
   document.getElementById('btn-cancel-choose').onclick = resetToIdle;
 }
 
-// ----- 画面: 出勤フォーム(業務開始時間) -----
+// =====================================================================
+// 画面: 出勤フォーム（業務開始時間 — QR読み取り時刻より後のみ）
+// =====================================================================
 function showCheckinForm(){
   const minHHMM = toHHMM(scanTime);
   ovBodyEl.innerHTML = `
@@ -293,8 +331,12 @@ function showCheckinForm(){
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-submit').onclick = () => {
     const hhmm = document.getElementById('in-start').value;
+    if (!hhmm){
+      document.getElementById('err-start').textContent = '時間を入力してください';
+      return;
+    }
     const workStart = combineTodayTime(hhmm);
-    if (!hhmm || workStart < scanTime){
+    if (workStart < scanTime){
       document.getElementById('err-start').textContent = '読み取り時刻より後の時間を入力してください';
       return;
     }
@@ -302,7 +344,10 @@ function showCheckinForm(){
   };
 }
 
-// ----- 画面: 退勤フォーム(業務終了時間・コマ数・休憩時間) -----
+// =====================================================================
+// 画面: 退勤フォーム（業務終了時間 — QR読み取り時刻より前のみ、
+//        実施コマ数・休憩時間・Comiru報告書チェック）
+// =====================================================================
 function showCheckoutForm(){
   const maxHHMM = toHHMM(scanTime);
   ovBodyEl.innerHTML = `
@@ -313,8 +358,8 @@ function showCheckoutForm(){
     <input type="number" class="ov-input" id="in-lessons" min="0" step="1" value="0" inputmode="numeric">
     <label class="ov-label">休憩時間（分）</label>
     <input type="number" class="ov-input" id="in-break" min="0" step="5" value="0" inputmode="numeric">
-    <label style="display:flex;align-items:center;gap:10px;margin-top:20px;font-size:16px;">
-      <input type="checkbox" id="in-comiru" style="width:22px;height:22px;">
+    <label class="ov-check">
+      <input type="checkbox" id="in-comiru">
       Comiru報告書を提出済み
     </label>
     <div class="ov-actions">
@@ -325,11 +370,15 @@ function showCheckoutForm(){
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-submit').onclick = () => {
     const hhmm = document.getElementById('in-end').value;
+    if (!hhmm){
+      document.getElementById('err-end').textContent = '時間を入力してください';
+      return;
+    }
     const workEnd = combineTodayTime(hhmm);
     const lessons = parseInt(document.getElementById('in-lessons').value, 10);
     const breakMin = parseInt(document.getElementById('in-break').value, 10);
     const comiruDone = document.getElementById('in-comiru').checked;
-    if (!hhmm || workEnd > scanTime){
+    if (workEnd > scanTime){
       document.getElementById('err-end').textContent = '読み取り時刻より前の時間を入力してください';
       return;
     }
@@ -341,8 +390,11 @@ function showCheckoutForm(){
   };
 }
 
-// Apps ScriptのWeb AppはブラウザからのPOST(fetch)だとCORSでブロックされるため、
-// <script>タグ経由のJSONPでリクエストする（CORSの対象外）
+// =====================================================================
+// 通信（JSONP）
+// Apps ScriptのWeb Appは、ブラウザからのfetch(POST)だとCORSでブロックされる
+// 仕様のため、<script>タグ経由のJSONP（GET）で通信します。
+// =====================================================================
 function jsonpRequest(params){
   return new Promise((resolve, reject) => {
     const callbackName = 'jsonp_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
@@ -351,7 +403,7 @@ function jsonpRequest(params){
     const timeoutId = setTimeout(() => {
       cleanup();
       reject(new Error('タイムアウトしました'));
-    }, 15000);
+    }, 20000);
 
     function cleanup(){
       clearTimeout(timeoutId);
@@ -368,7 +420,7 @@ function jsonpRequest(params){
     script.src = WEBHOOK_URL + '?' + query;
     script.onerror = () => {
       cleanup();
-      reject(new Error('Webhookへの接続に失敗しました'));
+      reject(new Error('Webhookへの接続に失敗しました。設定のURLを確認してください'));
     };
     document.body.appendChild(script);
   });
@@ -387,7 +439,7 @@ async function submitCheckin(workStart){
     });
     showResult(json, 'checkin');
   } catch(err){
-    showResult({ ok:false, message:'通信エラーです。もう一度お試しください。' });
+    showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
 
@@ -407,13 +459,16 @@ async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
     });
     showResult(json, 'checkout');
   } catch(err){
-    showResult({ ok:false, message:'通信エラーです。もう一度お試しください。' });
+    showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
 
+// =====================================================================
+// 画面: 結果表示
+// =====================================================================
 function showResult(json, kind){
   ovTeacherEl.textContent = '';
-  if (json.ok){
+  if (json && json.ok){
     const cls = kind === 'checkout' ? 'checkout' : 'ok';
     ovBodyEl.innerHTML = `
       <div class="ov-result ${cls}">
@@ -425,11 +480,11 @@ function showResult(json, kind){
     ovBodyEl.innerHTML = `
       <div class="ov-result error">
         <div class="name">エラー</div>
-        <div class="time">${json.message || '登録に失敗しました'}</div>
+        <div class="time">${(json && json.message) || '登録に失敗しました'}</div>
       </div>
     `;
   }
-  setTimeout(resetToIdle, 3200);
+  setTimeout(resetToIdle, 3600);
 }
 
 function showErrorScreen(message){
@@ -441,13 +496,17 @@ function showErrorScreen(message){
     </div>
   `;
   openOverlay();
-  setTimeout(resetToIdle, 2400);
+  setTimeout(resetToIdle, 2600);
 }
 
+// =====================================================================
+// 共通
+// =====================================================================
 function openOverlay(){ overlayEl.classList.add('show'); }
+function closeOverlay(){ overlayEl.classList.remove('show'); }
 
 function resetToIdle(){
-  overlayEl.classList.remove('show');
+  closeOverlay();
   currentTeacher = null;
   scanTime = null;
   statusEl.textContent = 'QRコードを枠の中にかざしてください';
@@ -455,37 +514,36 @@ function resetToIdle(){
   scanning = true;
 }
 
-// ----- ユーティリティ -----
 function toHHMM(date){
   const h = String(date.getHours()).padStart(2,'0');
   const m = String(date.getMinutes()).padStart(2,'0');
   return h + ':' + m;
 }
 function combineTodayTime(hhmm){
-  const [h, m] = hhmm.split(':').map(Number);
+  const parts = hhmm.split(':');
   const d = new Date();
-  d.setHours(h, m, 0, 0);
+  d.setHours(Number(parts[0]), Number(parts[1]), 0, 0);
   return d;
 }
 function fmtTime(date){
   return date.toLocaleTimeString('ja-JP', {hour12:false});
 }
 
+// =====================================================================
+// 起動処理
+// =====================================================================
+document.getElementById('settings-link').onclick = () => {
+  showSetupForm();
+};
+
 const savedWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK);
 const savedBranch = localStorage.getItem(STORAGE_KEY_BRANCH);
 if (savedWebhook && savedBranch){
-  WEBHOOK_URL = savedWebhook;
-  BRANCH_NAME = savedBranch;
-  document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
+  applyConfig(savedWebhook, savedBranch);
   startCamera();
 } else {
   showSetupForm();
 }
-
-document.getElementById('settings-link').onclick = () => {
-  scanning = false;
-  showSetupForm();
-};
 </script>
 </body>
 </html>
