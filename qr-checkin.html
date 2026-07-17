@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>出退勤 打刻</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<style>
+  :root{
+    --bg:#12203a;
+    --paper:#f5f1e8;
+    --gold:#f2b705;
+    --teal:#4fb6a8;
+    --red:#e4572e;
+    --muted:#8fa0c2;
+    --panel:#1b2c4d;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;height:100%;
+    background:var(--bg);
+    color:var(--paper);
+    font-family:'Noto Sans JP',sans-serif;
+    overflow:hidden;
+    -webkit-user-select:none;user-select:none;
+  }
+  #app{ position:relative; height:100vh; display:flex; flex-direction:column; }
+  header{
+    padding:24px 32px 12px;
+    display:flex; justify-content:space-between; align-items:baseline;
+    position:relative; z-index:2;
+  }
+  header .brand{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:22px; letter-spacing:.02em; }
+  header .brand span{ display:block; font-size:14px; font-weight:500; color:var(--muted); margin-top:4px; }
+  header .clock{ font-variant-numeric:tabular-nums; color:var(--muted); font-size:16px; }
+  main{ flex:1; position:relative; display:flex; align-items:center; justify-content:center; }
+  video{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; filter:brightness(.7); }
+  #frame{ position:relative; width:min(60vmin,420px); height:min(60vmin,420px); z-index:2; }
+  .corner{ position:absolute; width:44px; height:44px; border:4px solid var(--gold); opacity:.9; }
+  .corner.tl{top:0;left:0;border-right:none;border-bottom:none;border-radius:12px 0 0 0;}
+  .corner.tr{top:0;right:0;border-left:none;border-bottom:none;border-radius:0 12px 0 0;}
+  .corner.bl{bottom:0;left:0;border-right:none;border-top:none;border-radius:0 0 0 12px;}
+  .corner.br{bottom:0;right:0;border-left:none;border-top:none;border-radius:0 0 12px 0;}
+  #frame.pulse .corner{ animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse{ 0%,100%{opacity:.5;} 50%{opacity:1;} }
+  footer{ padding:28px 24px 40px; text-align:center; position:relative; z-index:2; }
+  #status{ font-size:20px; color:var(--muted); }
+  #camera-error{ display:none; position:absolute; inset:0; background:var(--bg); z-index:5; align-items:center; justify-content:center; text-align:center; padding:40px; font-size:18px; color:var(--muted); }
+
+  /* ===== オーバーレイ（選択・入力・結果画面） ===== */
+  #overlay{
+    position:absolute; inset:0; z-index:10;
+    display:none;
+    align-items:center; justify-content:center;
+    background:rgba(10,16,32,.72);
+    backdrop-filter:blur(2px);
+  }
+  #overlay.show{ display:flex; }
+  .card{
+    width:min(90vw,520px);
+    background:var(--panel);
+    border-radius:24px;
+    padding:36px 32px;
+    box-shadow:0 20px 60px rgba(0,0,0,.4);
+  }
+  .ov-teacher{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:28px; text-align:center; margin-bottom:18px; }
+  .ov-body{ font-size:17px; color:var(--paper); line-height:1.7; }
+  .ov-label{ display:block; font-size:14px; color:var(--muted); margin:18px 0 6px; }
+  .ov-input{
+    width:100%; padding:16px; font-size:22px; border-radius:12px; border:none;
+    background:#0f1a30; color:var(--paper); font-variant-numeric:tabular-nums;
+  }
+  .ov-input:focus{ outline:2px solid var(--gold); }
+  .ov-actions{ display:flex; gap:12px; margin-top:26px; }
+  .btn{
+    flex:1; padding:18px; border:none; border-radius:14px; font-size:18px; font-weight:700;
+    font-family:'Zen Maru Gothic',sans-serif; cursor:pointer;
+  }
+  .btn-gold{ background:var(--gold); color:#1c1400; }
+  .btn-teal{ background:var(--teal); color:#04211d; }
+  .btn-ghost{ background:transparent; color:var(--muted); border:1px solid #2c3f63; flex:0 0 auto; padding:18px 22px; }
+  .btn-primary{ background:var(--gold); color:#1c1400; width:100%; }
+  .ov-error{ color:var(--red); font-size:15px; margin-top:10px; min-height:20px; }
+  .ov-result{ text-align:center; }
+  .ov-result .name{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:32px; }
+  .ov-result .time{ color:var(--muted); font-size:16px; margin-top:8px; }
+  .ov-result.ok .name{ color:var(--gold); }
+  .ov-result.checkout .name{ color:var(--teal); }
+  .ov-result.error .name{ color:var(--red); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">スマイルスタディ<span id="branch-label"></span></div>
+    <div class="clock" id="clock">--:--:--</div>
+  </header>
+  <main>
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas" style="display:none;"></canvas>
+    <div id="frame" class="pulse">
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+    </div>
+    <div id="camera-error"><div>カメラを起動できませんでした。<br>タブレットの設定でカメラの許可を確認してください。</div></div>
+
+    <div id="overlay">
+      <div class="card">
+        <div class="ov-teacher" id="ov-teacher"></div>
+        <div class="ov-body" id="ov-body"></div>
+      </div>
+    </div>
+  </main>
+  <footer>
+    <div id="status">QRコードを枠の中にかざしてください</div>
+    <div id="debug" style="font-size:12px;color:#5b6c8f;margin-top:6px;"></div>
+  </footer>
+</div>
+
+<script>
+// ===== 設定：ここを書き換えてから使ってください =====
+const WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbzo1j_gNQ2SLFvwH7PFkrb1WZkyr_1Is46f1ozyHNEOzqLoncAVsaQInboXRA_NffA3/exec"; // Apps ScriptのウェブアプリURL
+const BRANCH_NAME = "春日部校"; // このタブレットが置いてある校舎名
+// ====================================================
+
+document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const statusEl = document.getElementById('status');
+const frameEl = document.getElementById('frame');
+const cameraErrorEl = document.getElementById('camera-error');
+const overlayEl = document.getElementById('overlay');
+const ovTeacherEl = document.getElementById('ov-teacher');
+const ovBodyEl = document.getElementById('ov-body');
+
+let scanning = true;
+let frameCount = 0;
+const debugEl = document.getElementById('debug');
+let currentTeacher = null; // { id, name }
+let scanTime = null;       // QRを読み取った瞬間のDate
+
+function updateClock(){
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('ja-JP', {hour12:false});
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+async function startCamera(){
+  if (typeof jsQR === 'undefined'){
+    debugEl.textContent = 'エラー：QR読み取りライブラリが読み込めていません（通信環境を確認してください）';
+    cameraErrorEl.style.display = 'flex';
+    cameraErrorEl.querySelector('div').innerHTML = 'QR読み取りライブラリの読み込みに失敗しました。<br>タブレットのインターネット接続を確認してください。';
+    return;
+  }
+
+  const attempts = [
+    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { video: { facingMode: 'environment' } },
+    { video: true } // 最後の手段：使えるカメラを何でも使う
+  ];
+
+  let lastErr = null;
+  for (const constraints of attempts){
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      await video.play();
+      debugEl.textContent = 'カメラ起動OK。QRを探しています…';
+      frameCount = 0;
+      requestAnimationFrame(tick);
+      return;
+    } catch(err){
+      lastErr = err;
+    }
+  }
+
+  debugEl.textContent = 'カメラ起動エラー：' + (lastErr ? (lastErr.name + ' ' + lastErr.message) : '不明なエラー');
+  cameraErrorEl.style.display = 'flex';
+}
+
+function tick(){
+  if (video.readyState === video.HAVE_ENOUGH_DATA && scanning){
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+    frameCount++;
+    if (frameCount % 30 === 0){
+      debugEl.textContent = 'スキャン中… (' + video.videoWidth + 'x' + video.videoHeight + ' / ' + frameCount + 'フレーム)';
+    }
+    if (code && code.data) handleScan(code.data);
+  }
+  requestAnimationFrame(tick);
+}
+
+function handleScan(data){
+  scanning = false;
+  frameEl.classList.remove('pulse');
+
+  let parsed = null;
+  try { parsed = JSON.parse(data); } catch(e) { parsed = null; }
+
+  if (!parsed || !parsed.id || !parsed.name){
+    showErrorScreen('QRコードの形式が正しくありません');
+    return;
+  }
+
+  currentTeacher = parsed;
+  scanTime = new Date();
+  showChoose();
+}
+
+// ----- 画面: 出勤/退勤の選択 -----
+function showChoose(){
+  ovTeacherEl.textContent = currentTeacher.name + ' 先生';
+  ovBodyEl.innerHTML = `
+    <div style="text-align:center;color:var(--muted);margin-bottom:6px;">読み取り時刻 ${fmtTime(scanTime)}</div>
+    <div style="text-align:center;">出勤ですか？退勤ですか？</div>
+    <div class="ov-actions">
+      <button class="btn btn-gold" id="btn-checkin">出勤</button>
+      <button class="btn btn-teal" id="btn-checkout">退勤</button>
+    </div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel-choose">キャンセル</button>
+    </div>
+  `;
+  openOverlay();
+  document.getElementById('btn-checkin').onclick = showCheckinForm;
+  document.getElementById('btn-checkout').onclick = showCheckoutForm;
+  document.getElementById('btn-cancel-choose').onclick = resetToIdle;
+}
+
+// ----- 画面: 出勤フォーム(業務開始時間) -----
+function showCheckinForm(){
+  const minHHMM = toHHMM(scanTime);
+  ovBodyEl.innerHTML = `
+    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} より後の時間のみ）</label>
+    <input type="time" class="ov-input" id="in-start" value="${minHHMM}" min="${minHHMM}">
+    <div class="ov-error" id="err-start"></div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="btn-submit">登録する</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  document.getElementById('btn-submit').onclick = () => {
+    const hhmm = document.getElementById('in-start').value;
+    const workStart = combineTodayTime(hhmm);
+    if (!hhmm || workStart < scanTime){
+      document.getElementById('err-start').textContent = '読み取り時刻より後の時間を入力してください';
+      return;
+    }
+    submitCheckin(workStart);
+  };
+}
+
+// ----- 画面: 退勤フォーム(業務終了時間・コマ数・休憩時間) -----
+function showCheckoutForm(){
+  const maxHHMM = toHHMM(scanTime);
+  ovBodyEl.innerHTML = `
+    <label class="ov-label">業務終了時間（読み取り時刻 ${fmtTime(scanTime)} より前の時間のみ）</label>
+    <input type="time" class="ov-input" id="in-end" value="${maxHHMM}" max="${maxHHMM}">
+    <div class="ov-error" id="err-end"></div>
+    <label class="ov-label">実施コマ数</label>
+    <input type="number" class="ov-input" id="in-lessons" min="0" step="1" value="0" inputmode="numeric">
+    <label class="ov-label">休憩時間（分）</label>
+    <input type="number" class="ov-input" id="in-break" min="0" step="5" value="0" inputmode="numeric">
+    <label style="display:flex;align-items:center;gap:10px;margin-top:20px;font-size:16px;">
+      <input type="checkbox" id="in-comiru" style="width:22px;height:22px;">
+      Comiru報告書を提出済み
+    </label>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="btn-submit">登録する</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  document.getElementById('btn-submit').onclick = () => {
+    const hhmm = document.getElementById('in-end').value;
+    const workEnd = combineTodayTime(hhmm);
+    const lessons = parseInt(document.getElementById('in-lessons').value, 10);
+    const breakMin = parseInt(document.getElementById('in-break').value, 10);
+    const comiruDone = document.getElementById('in-comiru').checked;
+    if (!hhmm || workEnd > scanTime){
+      document.getElementById('err-end').textContent = '読み取り時刻より前の時間を入力してください';
+      return;
+    }
+    if (isNaN(lessons) || lessons < 0 || isNaN(breakMin) || breakMin < 0){
+      document.getElementById('err-end').textContent = 'コマ数・休憩時間は0以上の数値で入力してください';
+      return;
+    }
+    submitCheckout(workEnd, lessons, breakMin, comiruDone);
+  };
+}
+
+async function submitCheckin(workStart){
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  try{
+    const res = await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        type: 'checkin',
+        teacherId: currentTeacher.id,
+        teacherName: currentTeacher.name,
+        branch: BRANCH_NAME,
+        scanTime: scanTime.toISOString(),
+        workStartTime: workStart.toISOString()
+      })
+    });
+    const json = await res.json();
+    showResult(json, 'checkin');
+  } catch(err){
+    showResult({ ok:false, message:'通信エラーです。もう一度お試しください。' });
+  }
+}
+
+async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  try{
+    const res = await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        type: 'checkout',
+        teacherId: currentTeacher.id,
+        teacherName: currentTeacher.name,
+        branch: BRANCH_NAME,
+        scanTime: scanTime.toISOString(),
+        workEndTime: workEnd.toISOString(),
+        lessonCount: lessons,
+        breakMinutes: breakMin,
+        comiruDone: comiruDone
+      })
+    });
+    const json = await res.json();
+    showResult(json, 'checkout');
+  } catch(err){
+    showResult({ ok:false, message:'通信エラーです。もう一度お試しください。' });
+  }
+}
+
+function showResult(json, kind){
+  ovTeacherEl.textContent = '';
+  if (json.ok){
+    const cls = kind === 'checkout' ? 'checkout' : 'ok';
+    ovBodyEl.innerHTML = `
+      <div class="ov-result ${cls}">
+        <div class="name">${json.name} 先生 ${kind === 'checkout' ? '退勤' : '出勤'}しました</div>
+        <div class="time">${fmtTime(new Date(json.time))}</div>
+      </div>
+    `;
+  } else {
+    ovBodyEl.innerHTML = `
+      <div class="ov-result error">
+        <div class="name">エラー</div>
+        <div class="time">${json.message || '登録に失敗しました'}</div>
+      </div>
+    `;
+  }
+  setTimeout(resetToIdle, 3200);
+}
+
+function showErrorScreen(message){
+  ovTeacherEl.textContent = '';
+  ovBodyEl.innerHTML = `
+    <div class="ov-result error">
+      <div class="name">エラー</div>
+      <div class="time">${message}</div>
+    </div>
+  `;
+  openOverlay();
+  setTimeout(resetToIdle, 2400);
+}
+
+function openOverlay(){ overlayEl.classList.add('show'); }
+
+function resetToIdle(){
+  overlayEl.classList.remove('show');
+  currentTeacher = null;
+  scanTime = null;
+  statusEl.textContent = 'QRコードを枠の中にかざしてください';
+  frameEl.classList.add('pulse');
+  scanning = true;
+}
+
+// ----- ユーティリティ -----
+function toHHMM(date){
+  const h = String(date.getHours()).padStart(2,'0');
+  const m = String(date.getMinutes()).padStart(2,'0');
+  return h + ':' + m;
+}
+function combineTodayTime(hhmm){
+  const [h, m] = hhmm.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d;
+}
+function fmtTime(date){
+  return date.toLocaleTimeString('ja-JP', {hour12:false});
+}
+
+startCamera();
+</script>
+</body>
+</html>
