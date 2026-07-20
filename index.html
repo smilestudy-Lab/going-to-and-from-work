@@ -163,6 +163,17 @@ const LATE_ADMIN_MESSAGE =
 
 function pickRandom(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
 
+// 実施コマ数に応じて必要な休憩時間（分）の下限を返す
+// 2コマ→10 / 3コマ→20 / 4コマ→30 / 5コマ→45 / 6コマ以上→60（0〜1コマは0）
+function requiredBreakMinutes(lessons){
+  if (lessons >= 6) return 60;
+  if (lessons >= 5) return 45;
+  if (lessons >= 4) return 30;
+  if (lessons >= 3) return 20;
+  if (lessons >= 2) return 10;
+  return 0;
+}
+
 // ----- DOM参照 -----
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -575,6 +586,12 @@ function showCheckoutForm(){
     }
     if (isNaN(lessons) || lessons < 0 || isNaN(breakMin) || breakMin < 0){
       document.getElementById('err-end').textContent = 'コマ数・休憩時間は0以上の数値で入力してください';
+      return;
+    }
+    const reqBreak = requiredBreakMinutes(lessons);
+    if (breakMin < reqBreak){
+      document.getElementById('err-end').textContent =
+        `${lessons}コマの場合、休憩は${reqBreak}分以上必要です（現在${breakMin}分）。休憩を取得のうえ入力してください。`;
       return;
     }
     submitCheckout(workEnd, lessons, breakMin, comiruDone);
