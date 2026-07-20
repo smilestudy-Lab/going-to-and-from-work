@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>スマイルスタディ 出退勤</title>
+<title>１対１スマイルスタディ 出退勤</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
@@ -15,6 +15,7 @@
     --gold:#f2b705;
     --teal:#4fb6a8;
     --red:#e4572e;
+    --orange:#e8862e;
     --muted:#8fa0c2;
     --panel:#1b2c4d;
   }
@@ -51,7 +52,6 @@
   #debug{ font-size:12px; color:#5b6c8f; margin-top:6px; min-height:16px; }
   #settings-link{ font-size:12px; color:#3d4d70; margin-top:10px; cursor:pointer; }
   #camera-error{ display:none; position:absolute; inset:0; background:var(--bg); z-index:5; align-items:center; justify-content:center; text-align:center; padding:40px; font-size:18px; color:var(--muted); }
-
   /* ===== オーバーレイ（設定・選択・入力・結果画面） ===== */
   #overlay{
     position:absolute; inset:0; z-index:10;
@@ -77,22 +77,29 @@
     background:#0f1a30; color:var(--paper); font-variant-numeric:tabular-nums;
   }
   .ov-input:focus{ outline:2px solid var(--gold); }
+  select.ov-input{ font-size:18px; }
   .ov-check{ display:flex; align-items:center; gap:10px; margin-top:20px; font-size:16px; }
   .ov-check input{ width:22px; height:22px; }
   .ov-actions{ display:flex; gap:12px; margin-top:26px; }
+  .ov-actions.stack{ flex-direction:column; }
   .btn{
     flex:1; padding:18px; border:none; border-radius:14px; font-size:18px; font-weight:700;
     font-family:'Zen Maru Gothic',sans-serif; cursor:pointer;
   }
   .btn-gold{ background:var(--gold); color:#1c1400; }
   .btn-teal{ background:var(--teal); color:#04211d; }
+  .btn-orange{ background:var(--orange); color:#2a1600; }
   .btn-ghost{ background:transparent; color:var(--muted); border:1px solid #2c3f63; flex:0 0 auto; padding:18px 22px; }
   .btn-primary{ background:var(--gold); color:#1c1400; width:100%; }
   .ov-error{ color:var(--red); font-size:15px; margin-top:10px; min-height:20px; }
+  .ov-note{ background:#0f1a30; border-radius:12px; padding:14px 16px; font-size:15px; color:var(--paper); margin-top:16px; line-height:1.7; }
+  .ov-note.warn{ border-left:4px solid var(--orange); }
   .ov-result{ text-align:center; }
-  .ov-result .name{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:32px; }
+  .ov-result .name{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:28px; }
   .ov-result .time{ color:var(--muted); font-size:16px; margin-top:8px; }
+  .ov-result .msg{ font-size:16px; margin-top:16px; line-height:1.8; color:var(--paper); }
   .ov-result.ok .name{ color:var(--gold); }
+  .ov-result.late .name{ color:var(--orange); }
   .ov-result.checkout .name{ color:var(--teal); }
   .ov-result.error .name{ color:var(--red); }
 </style>
@@ -111,7 +118,6 @@
       <div class="corner bl"></div><div class="corner br"></div>
     </div>
     <div id="camera-error"><div id="camera-error-msg">カメラを起動できませんでした。<br>タブレットの設定でカメラの許可を確認してください。</div></div>
-
     <div id="overlay">
       <div class="card">
         <div class="ov-teacher" id="ov-teacher"></div>
@@ -125,10 +131,8 @@
     <div id="settings-link">&#9881; 設定</div>
   </footer>
 </div>
-
 <script>
 'use strict';
-
 // =====================================================================
 // 設定はこのファイルには書きません。
 // Webhook URLと校舎名は、初回起動時の「初期設定」画面で入力してもらい、
@@ -139,6 +143,25 @@ const STORAGE_KEY_WEBHOOK = 'smilestudy_webhook_url';
 const STORAGE_KEY_BRANCH = 'smilestudy_branch_name';
 let WEBHOOK_URL = '';
 let BRANCH_NAME = '';
+
+// 遅刻の判定しきい値（分）。5分以内は代講なし。
+const LATE_THRESHOLD_MIN = 5;
+
+// 講師向けランダムメッセージ
+const CHECKIN_MESSAGES = [
+  '今日もよろしくお願いします！',
+  '今日も生徒様の小さな前進を大切にしていきましょう！',
+  '困ったことがあれば早めに共有してください！'
+];
+const CHECKOUT_MESSAGES = [
+  '本日もありがとうございました！気をつけてお帰りください。',
+  '今日も一日お疲れ様でした！',
+  '退勤を記録しました。次回もよろしくお願いします！'
+];
+const LATE_ADMIN_MESSAGE =
+  '遅刻内容を記録しました。\n業務に入る前に、運営管理者へ一度状況を説明し、対応内容の確認を受けてから業務に入ってください。';
+
+function pickRandom(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
 
 // ----- DOM参照 -----
 const video = document.getElementById('video');
@@ -160,6 +183,9 @@ let frameCount = 0;
 let currentTeacher = null; // { id, name }
 let scanTime = null;       // QRを読み取った瞬間のDate
 
+// 遅刻フローの一時状態
+let lateState = null; // { lateMinutes, lateResponse, substituteId, substituteName }
+
 // ----- 時計 -----
 function updateClock(){
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('ja-JP', {hour12:false});
@@ -177,18 +203,15 @@ async function startCamera(){
     debugEl.textContent = 'エラー：jsQRライブラリ未読み込み';
     return;
   }
-
   if (cameraStarted){
     scanning = true;
     return;
   }
-
   const attempts = [
     { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
     { video: { facingMode: 'environment' } },
     { video: true } // 最後の手段：使えるカメラを何でも使う
   ];
-
   let lastErr = null;
   for (const constraints of attempts){
     try{
@@ -205,7 +228,6 @@ async function startCamera(){
       lastErr = err;
     }
   }
-
   cameraErrorEl.style.display = 'flex';
   debugEl.textContent = 'カメラ起動エラー：' + (lastErr ? (lastErr.name + ' ' + lastErr.message) : '不明');
 }
@@ -229,17 +251,15 @@ function tick(){
 function handleScan(data){
   scanning = false;
   frameEl.classList.remove('pulse');
-
   let parsed = null;
   try { parsed = JSON.parse(data); } catch(e) { parsed = null; }
-
   if (!parsed || !parsed.id || !parsed.name){
     showErrorScreen('QRコードの形式が正しくありません');
     return;
   }
-
   currentTeacher = parsed;
   scanTime = new Date();
+  lateState = null;
   showChoose();
 }
 
@@ -249,7 +269,6 @@ function handleScan(data){
 function showSetupForm(){
   const existingWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK) || '';
   const existingBranch = localStorage.getItem(STORAGE_KEY_BRANCH) || '春日部校';
-
   scanning = false;
   ovTeacherEl.textContent = '初期設定';
   ovBodyEl.innerHTML = `
@@ -266,7 +285,6 @@ function showSetupForm(){
   document.getElementById('in-webhook').value = existingWebhook;
   document.getElementById('in-branch').value = existingBranch;
   openOverlay();
-
   document.getElementById('btn-save-setup').onclick = () => {
     const webhook = document.getElementById('in-webhook').value.trim();
     const branch = document.getElementById('in-branch').value.trim();
@@ -285,7 +303,6 @@ function showSetupForm(){
     startCamera();
   };
 }
-
 function applyConfig(webhook, branch){
   WEBHOOK_URL = webhook;
   BRANCH_NAME = branch;
@@ -293,15 +310,16 @@ function applyConfig(webhook, branch){
 }
 
 // =====================================================================
-// 画面: 出勤/退勤の選択
+// 画面: 出勤 / 遅刻 / 退勤 の選択
 // =====================================================================
 function showChoose(){
   ovTeacherEl.textContent = currentTeacher.name + ' 先生';
   ovBodyEl.innerHTML = `
     <div style="text-align:center;color:var(--muted);margin-bottom:6px;">読み取り時刻 ${fmtTime(scanTime)}</div>
-    <div style="text-align:center;">出勤ですか？退勤ですか？</div>
+    <div style="text-align:center;">本日の打刻を選んでください</div>
     <div class="ov-actions">
       <button class="btn btn-gold" id="btn-checkin">出勤</button>
+      <button class="btn btn-orange" id="btn-late">遅刻</button>
       <button class="btn btn-teal" id="btn-checkout">退勤</button>
     </div>
     <div class="ov-actions">
@@ -310,6 +328,7 @@ function showChoose(){
   `;
   openOverlay();
   document.getElementById('btn-checkin').onclick = showCheckinForm;
+  document.getElementById('btn-late').onclick = showLateMinutesForm;
   document.getElementById('btn-checkout').onclick = showCheckoutForm;
   document.getElementById('btn-cancel-choose').onclick = resetToIdle;
 }
@@ -319,6 +338,7 @@ function showChoose(){
 // =====================================================================
 function showCheckinForm(){
   const minHHMM = toHHMM(scanTime);
+  ovTeacherEl.textContent = currentTeacher.name + ' 先生（出勤）';
   ovBodyEl.innerHTML = `
     <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} より後の時間のみ）</label>
     <input type="time" class="ov-input" id="in-start" value="${minHHMM}" min="${minHHMM}">
@@ -345,11 +365,182 @@ function showCheckinForm(){
 }
 
 // =====================================================================
+// 遅刻フロー ①: 遅刻分を数値入力
+// =====================================================================
+function showLateMinutesForm(){
+  ovTeacherEl.textContent = currentTeacher.name + ' 先生（遅刻）';
+  ovBodyEl.innerHTML = `
+    <label class="ov-label">遅刻分（授業開始時刻から何分遅れたか）</label>
+    <input type="number" class="ov-input" id="in-late-min" min="1" step="1" inputmode="numeric" placeholder="例：3">
+    <div class="ov-error" id="err-late-min"></div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="btn-next">次へ</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  document.getElementById('btn-next').onclick = () => {
+    const val = parseInt(document.getElementById('in-late-min').value, 10);
+    if (isNaN(val) || val <= 0){
+      document.getElementById('err-late-min').textContent = '1以上の数値を入力してください';
+      return;
+    }
+    lateState = { lateMinutes: val, lateResponse: null, substituteId: null, substituteName: null };
+    // GAS側と同じ判定ロジックをフロントでも実施（表示・分岐用）
+    if (val <= LATE_THRESHOLD_MIN){
+      // 5分以内：代講なし。追加入力なしで業務開始時間へ
+      showLateStartForm();
+    } else {
+      // 5分超：遅刻時対応を選択
+      showLateResponseForm();
+    }
+  };
+}
+
+// =====================================================================
+// 遅刻フロー ②(5分超のみ): 遅刻時対応を選択
+// =====================================================================
+function showLateResponseForm(){
+  ovBodyEl.innerHTML = `
+    <div class="ov-note warn">遅刻 ${lateState.lateMinutes} 分（5分超）です。対応を選択してください。</div>
+    <label class="ov-label">遅刻時対応</label>
+    <div class="ov-actions stack">
+      <button class="btn btn-orange" data-resp="代講対応">代講対応</button>
+      <button class="btn btn-orange" data-resp="同日延長">同日延長</button>
+      <button class="btn btn-orange" data-resp="別日補填予定">別日補填予定</button>
+    </div>
+    <div class="ov-error" id="err-late-resp"></div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  ovBodyEl.querySelectorAll('[data-resp]').forEach(btn => {
+    btn.onclick = () => {
+      lateState.lateResponse = btn.getAttribute('data-resp');
+      if (lateState.lateResponse === '代講対応'){
+        showSubstituteForm();
+      } else {
+        lateState.substituteId = null;
+        lateState.substituteName = null;
+        showLateStartForm();
+      }
+    };
+  });
+}
+
+// =====================================================================
+// 遅刻フロー ③(代講対応のみ): 代講者を講師一覧DBから選択
+// =====================================================================
+async function showSubstituteForm(){
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">講師一覧を読み込んでいます…</div>`;
+  let teachers = [];
+  try{
+    const json = await jsonpRequest({ type: 'teachers', teacherId: currentTeacher.id });
+    if (!json || !json.ok){
+      throw new Error((json && json.message) || '講師一覧の取得に失敗しました');
+    }
+    teachers = json.teachers || [];
+  } catch(err){
+    ovBodyEl.innerHTML = `
+      <div class="ov-error">${escapeHtml(err.message || '講師一覧の取得に失敗しました')}</div>
+      <div class="ov-actions">
+        <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+        <button class="btn btn-primary" id="btn-retry">再試行</button>
+      </div>
+    `;
+    document.getElementById('btn-cancel').onclick = resetToIdle;
+    document.getElementById('btn-retry').onclick = showSubstituteForm;
+    return;
+  }
+
+  // 本人はサーバー側で除外済みだが、念のためフロントでも除外
+  teachers = teachers.filter(t => t.id && t.name);
+
+  if (teachers.length === 0){
+    ovBodyEl.innerHTML = `
+      <div class="ov-error">選択できる代講者がいません（本人以外の講師が見つかりません）</div>
+      <div class="ov-actions">
+        <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      </div>
+    `;
+    document.getElementById('btn-cancel').onclick = resetToIdle;
+    return;
+  }
+
+  const options = teachers.map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join('');
+  ovBodyEl.innerHTML = `
+    <div class="ov-note warn">代講対応：代講した講師を選択してください（本人は選べません）。</div>
+    <label class="ov-label">代講者</label>
+    <select class="ov-input" id="in-substitute">
+      <option value="">選択してください</option>
+      ${options}
+    </select>
+    <div class="ov-error" id="err-substitute"></div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="btn-next">次へ</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  document.getElementById('btn-next').onclick = () => {
+    const sel = document.getElementById('in-substitute');
+    const id = sel.value;
+    if (!id){
+      document.getElementById('err-substitute').textContent = '代講者を選択してください';
+      return;
+    }
+    lateState.substituteId = id;
+    lateState.substituteName = sel.options[sel.selectedIndex].text;
+    showLateStartForm();
+  };
+}
+
+// =====================================================================
+// 遅刻フロー ④: 業務開始時間を入力して登録
+// =====================================================================
+function showLateStartForm(){
+  const minHHMM = toHHMM(scanTime);
+  let summary = `遅刻 ${lateState.lateMinutes} 分`;
+  if (lateState.lateMinutes <= LATE_THRESHOLD_MIN){
+    summary += '（5分以内｜代講なし）';
+  } else {
+    summary += `｜${escapeHtml(lateState.lateResponse)}`;
+    if (lateState.substituteName) summary += `（代講者：${escapeHtml(lateState.substituteName)}）`;
+  }
+  ovBodyEl.innerHTML = `
+    <div class="ov-note">${summary}</div>
+    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} より後の時間のみ）</label>
+    <input type="time" class="ov-input" id="in-start" value="${minHHMM}" min="${minHHMM}">
+    <div class="ov-error" id="err-start"></div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="btn-submit">登録する</button>
+    </div>
+  `;
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  document.getElementById('btn-submit').onclick = () => {
+    const hhmm = document.getElementById('in-start').value;
+    if (!hhmm){
+      document.getElementById('err-start').textContent = '時間を入力してください';
+      return;
+    }
+    const workStart = combineTodayTime(hhmm);
+    if (workStart < scanTime){
+      document.getElementById('err-start').textContent = '読み取り時刻より後の時間を入力してください';
+      return;
+    }
+    submitLate(workStart);
+  };
+}
+
+// =====================================================================
 // 画面: 退勤フォーム（業務終了時間 — QR読み取り時刻より前のみ、
 //        実施コマ数・休憩時間・Comiru報告書チェック）
 // =====================================================================
 function showCheckoutForm(){
   const maxHHMM = toHHMM(scanTime);
+  ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
   ovBodyEl.innerHTML = `
     <label class="ov-label">業務終了時間（読み取り時刻 ${fmtTime(scanTime)} より前の時間のみ）</label>
     <input type="time" class="ov-input" id="in-end" value="${maxHHMM}" max="${maxHHMM}">
@@ -399,23 +590,19 @@ function jsonpRequest(params){
   return new Promise((resolve, reject) => {
     const callbackName = 'jsonp_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
     const script = document.createElement('script');
-
     const timeoutId = setTimeout(() => {
       cleanup();
       reject(new Error('タイムアウトしました'));
     }, 20000);
-
     function cleanup(){
       clearTimeout(timeoutId);
       delete window[callbackName];
       if (script.parentNode) script.parentNode.removeChild(script);
     }
-
     window[callbackName] = (data) => {
       cleanup();
       resolve(data);
     };
-
     const query = new URLSearchParams(Object.assign({}, params, { callback: callbackName })).toString();
     script.src = WEBHOOK_URL + '?' + query;
     script.onerror = () => {
@@ -438,6 +625,32 @@ async function submitCheckin(workStart){
       workStartTime: workStart.toISOString()
     });
     showResult(json, 'checkin');
+  } catch(err){
+    showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
+  }
+}
+
+async function submitLate(workStart){
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  try{
+    const params = {
+      type: 'late',
+      teacherId: currentTeacher.id,
+      teacherName: currentTeacher.name,
+      branch: BRANCH_NAME,
+      scanTime: scanTime.toISOString(),
+      workStartTime: workStart.toISOString(),
+      lateMinutes: String(lateState.lateMinutes)
+    };
+    // 5分超のみ対応・代講者を送る（5分以内は遅刻分のみ）
+    if (lateState.lateMinutes > LATE_THRESHOLD_MIN){
+      params.lateResponse = lateState.lateResponse || '';
+      if (lateState.lateResponse === '代講対応' && lateState.substituteId){
+        params.substituteId = lateState.substituteId;
+      }
+    }
+    const json = await jsonpRequest(params);
+    showResult(json, 'late');
   } catch(err){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
@@ -469,22 +682,39 @@ async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
 function showResult(json, kind){
   ovTeacherEl.textContent = '';
   if (json && json.ok){
+    if (kind === 'late'){
+      // 遅刻：運営管理者への確認メッセージを必ず表示
+      ovBodyEl.innerHTML = `
+        <div class="ov-result late">
+          <div class="name">${escapeHtml(json.name)} 先生 遅刻を記録しました</div>
+          <div class="time">${fmtTime(new Date(json.time))}</div>
+          <div class="msg">${escapeHtml(LATE_ADMIN_MESSAGE).replace(/\n/g,'<br>')}</div>
+        </div>
+      `;
+      // 遅刻は確認を促すため、少し長めに表示
+      setTimeout(resetToIdle, 6500);
+      return;
+    }
     const cls = kind === 'checkout' ? 'checkout' : 'ok';
+    const verb = kind === 'checkout' ? '退勤' : '出勤';
+    const msg = kind === 'checkout' ? pickRandom(CHECKOUT_MESSAGES) : pickRandom(CHECKIN_MESSAGES);
     ovBodyEl.innerHTML = `
       <div class="ov-result ${cls}">
-        <div class="name">${json.name} 先生 ${kind === 'checkout' ? '退勤' : '出勤'}しました</div>
+        <div class="name">${escapeHtml(json.name)} 先生 ${verb}しました</div>
         <div class="time">${fmtTime(new Date(json.time))}</div>
+        <div class="msg">${escapeHtml(msg)}</div>
       </div>
     `;
+    setTimeout(resetToIdle, 3600);
   } else {
     ovBodyEl.innerHTML = `
       <div class="ov-result error">
         <div class="name">エラー</div>
-        <div class="time">${(json && json.message) || '登録に失敗しました'}</div>
+        <div class="time">${escapeHtml((json && json.message) || '登録に失敗しました')}</div>
       </div>
     `;
+    setTimeout(resetToIdle, 3600);
   }
-  setTimeout(resetToIdle, 3600);
 }
 
 function showErrorScreen(message){
@@ -492,7 +722,7 @@ function showErrorScreen(message){
   ovBodyEl.innerHTML = `
     <div class="ov-result error">
       <div class="name">エラー</div>
-      <div class="time">${message}</div>
+      <div class="time">${escapeHtml(message)}</div>
     </div>
   `;
   openOverlay();
@@ -504,16 +734,15 @@ function showErrorScreen(message){
 // =====================================================================
 function openOverlay(){ overlayEl.classList.add('show'); }
 function closeOverlay(){ overlayEl.classList.remove('show'); }
-
 function resetToIdle(){
   closeOverlay();
   currentTeacher = null;
   scanTime = null;
+  lateState = null;
   statusEl.textContent = 'QRコードを枠の中にかざしてください';
   frameEl.classList.add('pulse');
   scanning = true;
 }
-
 function toHHMM(date){
   const h = String(date.getHours()).padStart(2,'0');
   const m = String(date.getMinutes()).padStart(2,'0');
@@ -528,6 +757,11 @@ function combineTodayTime(hhmm){
 function fmtTime(date){
   return date.toLocaleTimeString('ja-JP', {hour12:false});
 }
+function escapeHtml(str){
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 
 // =====================================================================
 // 起動処理
@@ -535,7 +769,6 @@ function fmtTime(date){
 document.getElementById('settings-link').onclick = () => {
   showSetupForm();
 };
-
 const savedWebhook = localStorage.getItem(STORAGE_KEY_WEBHOOK);
 const savedBranch = localStorage.getItem(STORAGE_KEY_BRANCH);
 if (savedWebhook && savedBranch){
