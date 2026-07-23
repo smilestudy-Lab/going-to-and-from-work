@@ -50,7 +50,12 @@
   footer{ padding:28px 24px 40px; text-align:center; position:relative; z-index:2; }
   #status{ font-size:20px; color:var(--muted); }
   #debug{ font-size:12px; color:#5b6c8f; margin-top:6px; min-height:16px; }
-  #settings-link{ font-size:12px; color:#3d4d70; margin-top:10px; cursor:pointer; }
+  #cam-switch{
+    margin-top:14px; background:transparent; border:1px solid #2c3f63; color:var(--paper);
+    border-radius:10px; padding:9px 18px; font-size:14px; cursor:pointer;
+    font-family:'Noto Sans JP',sans-serif;
+  }
+  #settings-link{ font-size:12px; color:#3d4d70; margin-top:12px; cursor:pointer; }
   #camera-error{ display:none; position:absolute; inset:0; background:var(--bg); z-index:5; align-items:center; justify-content:center; text-align:center; padding:40px; font-size:18px; color:var(--muted); }
   /* ===== オーバーレイ（設定・選択・入力・結果画面） ===== */
   #overlay{
@@ -78,6 +83,13 @@
   }
   .ov-input:focus{ outline:2px solid var(--gold); }
   select.ov-input{ font-size:18px; }
+  /* タップでホイールを開く表示フィールド（時間・数値 共通） */
+  .tapfield{
+    width:100%; padding:16px; font-size:26px; border-radius:12px; border:none;
+    background:#0f1a30; color:var(--paper); font-variant-numeric:tabular-nums;
+    display:flex; align-items:center; justify-content:space-between; cursor:pointer;
+  }
+  .tapfield .tf-ico{ font-size:15px; color:var(--muted); }
   .ov-check{ display:flex; align-items:center; gap:10px; margin-top:20px; font-size:16px; }
   .ov-check input{ width:22px; height:22px; }
   .ov-actions{ display:flex; gap:12px; margin-top:26px; }
@@ -102,6 +114,40 @@
   .ov-result.late .name{ color:var(--orange); }
   .ov-result.checkout .name{ color:var(--teal); }
   .ov-result.error .name{ color:var(--red); }
+  /* ===== スクロール式ホイールピッカー（時間・数値 共通） ===== */
+  #wheel{
+    position:fixed; inset:0; z-index:30; display:none;
+    align-items:flex-end; justify-content:center;
+    background:rgba(10,16,32,.6);
+  }
+  #wheel.show{ display:flex; }
+  .wheel-sheet{
+    width:min(94vw,440px); background:var(--panel);
+    border-radius:24px 24px 0 0; padding:20px 22px 26px;
+    box-shadow:0 -12px 40px rgba(0,0,0,.4);
+  }
+  .wheel-title{ text-align:center; color:var(--muted); font-size:14px; margin-bottom:12px; }
+  .wheel-cols{ position:relative; display:flex; justify-content:center; align-items:center; gap:14px; height:208px; }
+  .wheel-highlight{
+    position:absolute; left:0; right:0; top:calc(50% - 26px); height:52px;
+    border-top:1px solid #3a4d75; border-bottom:1px solid #3a4d75;
+    background:rgba(242,183,5,.06); border-radius:8px; pointer-events:none;
+  }
+  .wheel-col{
+    height:208px; width:92px; overflow-y:scroll;
+    scroll-snap-type:y mandatory; text-align:center;
+    -ms-overflow-style:none; scrollbar-width:none;
+  }
+  .wheel-col::-webkit-scrollbar{ display:none; }
+  .wheel-col .pad{ height:78px; }
+  .wheel-item{
+    height:52px; line-height:52px; font-size:30px; scroll-snap-align:center;
+    color:#5f7099; font-variant-numeric:tabular-nums; transition:color .12s,transform .12s;
+  }
+  .wheel-item.sel{ color:var(--paper); font-weight:700; transform:scale(1.12); }
+  .wheel-colon,.wheel-unit{ font-size:26px; color:var(--paper); }
+  .wheel-unit{ font-size:20px; color:var(--muted); }
+  .wheel-actions{ display:flex; gap:12px; margin-top:18px; }
 </style>
 </head>
 <body>
@@ -124,10 +170,22 @@
         <div class="ov-body" id="ov-body"></div>
       </div>
     </div>
+    <!-- スクロール式ホイールピッカー（時間・数値 共通） -->
+    <div id="wheel">
+      <div class="wheel-sheet">
+        <div class="wheel-title" id="wheel-title">選択</div>
+        <div class="wheel-cols" id="wheel-cols"></div>
+        <div class="wheel-actions">
+          <button class="btn btn-ghost" id="wheel-cancel" style="flex:1;">キャンセル</button>
+          <button class="btn btn-primary" id="wheel-confirm">決定</button>
+        </div>
+      </div>
+    </div>
   </main>
   <footer>
     <div id="status">QRコードを枠の中にかざしてください</div>
     <div id="debug"></div>
+    <button id="cam-switch">&#128247; カメラ切替</button>
     <div id="settings-link">&#9881; 設定</div>
   </footer>
 </div>
@@ -137,16 +195,15 @@
 // 設定はこのファイルには書きません。
 // Webhook URLと校舎名は、初回起動時の「初期設定」画面で入力してもらい、
 // この端末のlocalStorageにだけ保存されます。
-// （URLやファイルに書かないので、このファイルはGitHub等に公開しても安全です）
 // =====================================================================
 const STORAGE_KEY_WEBHOOK = 'smilestudy_webhook_url';
 const STORAGE_KEY_BRANCH = 'smilestudy_branch_name';
+const STORAGE_KEY_FACING = 'smilestudy_camera_facing'; // 'environment'（外カメ） or 'user'（内カメ）
 let WEBHOOK_URL = '';
 let BRANCH_NAME = '';
-
+let CAMERA_FACING = localStorage.getItem(STORAGE_KEY_FACING) || 'environment';
 // 遅刻の判定しきい値（分）。5分以内は代講なし。
 const LATE_THRESHOLD_MIN = 5;
-
 // 講師向けランダムメッセージ
 const CHECKIN_MESSAGES = [
   '今日もよろしくお願いします！',
@@ -160,11 +217,8 @@ const CHECKOUT_MESSAGES = [
 ];
 const LATE_ADMIN_MESSAGE =
   '遅刻内容を記録しました。\n業務に入る前に、運営管理者へ一度状況を説明し、対応内容の確認を受けてから業務に入ってください。';
-
 function pickRandom(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
-
 // 実施コマ数に応じて必要な休憩時間（分）の下限を返す
-// 2コマ→10 / 3コマ→20 / 4コマ→30 / 5コマ→45 / 6コマ以上→60（0〜1コマは0）
 function requiredBreakMinutes(lessons){
   if (lessons >= 6) return 60;
   if (lessons >= 5) return 45;
@@ -173,7 +227,6 @@ function requiredBreakMinutes(lessons){
   if (lessons >= 2) return 10;
   return 0;
 }
-
 // ----- DOM参照 -----
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -186,27 +239,150 @@ const cameraErrorMsgEl = document.getElementById('camera-error-msg');
 const overlayEl = document.getElementById('overlay');
 const ovTeacherEl = document.getElementById('ov-teacher');
 const ovBodyEl = document.getElementById('ov-body');
-
+const camSwitchEl = document.getElementById('cam-switch');
 // ----- 状態 -----
 let scanning = false;
 let cameraStarted = false;
 let frameCount = 0;
 let currentTeacher = null; // { id, name }
 let scanTime = null;       // QRを読み取った瞬間のDate
-
-// 遅刻フローの一時状態
-let lateState = null; // { lateMinutes, lateResponse, substituteId, substituteName }
-
+let lateState = null;      // { lateMinutes, lateResponse, substituteId, substituteName }
 // ----- 時計 -----
 function updateClock(){
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('ja-JP', {hour12:false});
 }
 setInterval(updateClock, 1000);
 updateClock();
-
+// =====================================================================
+// スクロール式ホイールピッカー（汎用）
+//   数字をスクロールして選び「決定」で確定します。
+//   - 時間ピッカー: 時・分の2列
+//   - 数値ピッカー: 1列（コマ数・休憩時間・遅刻分など）
+// =====================================================================
+const ITEM_H = 52;
+const wheelEl = document.getElementById('wheel');
+const wheelTitleEl = document.getElementById('wheel-title');
+const wheelColsEl = document.getElementById('wheel-cols');
+const wheelConfirmEl = document.getElementById('wheel-confirm');
+const wheelCancelEl = document.getElementById('wheel-cancel');
+function pad2(n){ return String(n).padStart(2,'0'); }
+function hm2min(hhmm){ const p = hhmm.split(':'); return Number(p[0])*60 + Number(p[1]); }
+function markWheelSel(col){
+  const items = col.querySelectorAll('.wheel-item');
+  let idx = Math.round(col.scrollTop / ITEM_H);
+  idx = Math.max(0, Math.min(items.length - 1, idx));
+  items.forEach(function(el, i){ el.classList.toggle('sel', i === idx); });
+}
+// cols: [{ values:[表示文字列...], initialIndex, unit(任意), sep(任意 既定':') }]
+// onConfirm(indices[]) に各列の選択インデックスを渡す
+function openWheel(title, cols, onConfirm){
+  wheelTitleEl.textContent = title;
+  let html = '<div class="wheel-highlight"></div>';
+  cols.forEach(function(c, ci){
+    html += '<div class="wheel-col"><div class="pad"></div>' +
+            c.values.map(function(v){ return '<div class="wheel-item">' + v + '</div>'; }).join('') +
+            '<div class="pad"></div></div>';
+    if (c.unit){
+      html += '<div class="wheel-unit">' + c.unit + '</div>';
+    } else if (ci < cols.length - 1){
+      html += '<div class="wheel-colon">' + (c.sep || ':') + '</div>';
+    }
+  });
+  wheelColsEl.innerHTML = html;
+  const colEls = wheelColsEl.querySelectorAll('.wheel-col');
+  colEls.forEach(function(col){
+    let t;
+    col.addEventListener('scroll', function(){
+      clearTimeout(t);
+      t = setTimeout(function(){ markWheelSel(col); }, 50);
+    });
+  });
+  wheelEl.classList.add('show');
+  // 表示後にスクロール位置を設定（非表示中はscrollTopが効かないため）
+  requestAnimationFrame(function(){
+    colEls.forEach(function(col, ci){
+      col.scrollTop = (cols[ci].initialIndex || 0) * ITEM_H;
+      markWheelSel(col);
+    });
+  });
+  wheelConfirmEl.onclick = function(){
+    const idxs = Array.prototype.map.call(colEls, function(col){
+      const n = col.querySelectorAll('.wheel-item').length;
+      return Math.max(0, Math.min(n - 1, Math.round(col.scrollTop / ITEM_H)));
+    });
+    wheelEl.classList.remove('show');
+    onConfirm(idxs);
+  };
+  wheelCancelEl.onclick = function(){ wheelEl.classList.remove('show'); };
+}
+// 時間ホイール（時・分）。min/max（HHMM）を外れたら範囲内へ丸める。
+function openTimeWheel(initial, min, max, title, onConfirm){
+  const parts = (initial || '00:00').split(':');
+  const h = Math.max(0, Math.min(23, parseInt(parts[0], 10) || 0));
+  const m = Math.max(0, Math.min(59, parseInt(parts[1], 10) || 0));
+  const hours = []; for (let i = 0; i < 24; i++) hours.push(pad2(i));
+  const mins = []; for (let i = 0; i < 60; i++) mins.push(pad2(i));
+  openWheel(title || '時間を選択',
+    [{ values: hours, initialIndex: h }, { values: mins, initialIndex: m }],
+    function(idxs){
+      let total = idxs[0] * 60 + idxs[1];
+      if (min != null){ const t = hm2min(min); if (total < t) total = t; }
+      if (max != null){ const t = hm2min(max); if (total > t) total = t; }
+      onConfirm(pad2(Math.floor(total / 60)) + ':' + pad2(total % 60));
+    });
+}
+// 数値ホイール（1列）。min〜maxをstep刻みで表示。
+function openNumberWheel(initial, min, max, step, unit, title, onConfirm){
+  const values = [];
+  for (let v = min; v <= max; v += step) values.push(String(v));
+  let idx = Math.round((initial - min) / step);
+  idx = Math.max(0, Math.min(values.length - 1, idx));
+  openWheel(title, [{ values: values, initialIndex: idx, unit: unit }], function(idxs){
+    onConfirm(min + idxs[0] * step);
+  });
+}
+// --- タップフィールド（共通） ---
+// 実体の値は同じidの hidden input に入るので、既存の .value 参照はそのまま動きます。
+function timeFieldHtml(fieldId, value){
+  return '<div class="tapfield" id="' + fieldId + '-field">' +
+           '<span class="tf-val">' + value + '</span><span class="tf-ico">&#9660; スクロール</span>' +
+         '</div>' +
+         '<input type="hidden" id="' + fieldId + '" value="' + value + '">';
+}
+function attachTimeField(fieldId, min, max, title){
+  const field = document.getElementById(fieldId + '-field');
+  const hidden = document.getElementById(fieldId);
+  field.onclick = function(){
+    openTimeWheel(hidden.value, min, max, title, function(v){
+      hidden.value = v;
+      field.querySelector('.tf-val').textContent = v;
+    });
+  };
+}
+function numberFieldHtml(fieldId, value, unit){
+  return '<div class="tapfield" id="' + fieldId + '-field">' +
+           '<span><span class="tf-val">' + value + '</span> ' + unit + '</span>' +
+           '<span class="tf-ico">&#9660; スクロール</span>' +
+         '</div>' +
+         '<input type="hidden" id="' + fieldId + '" value="' + value + '">';
+}
+function attachNumberField(fieldId, min, max, step, unit, title){
+  const field = document.getElementById(fieldId + '-field');
+  const hidden = document.getElementById(fieldId);
+  field.onclick = function(){
+    openNumberWheel(Number(hidden.value), min, max, step, unit, title, function(val){
+      hidden.value = String(val);
+      field.querySelector('.tf-val').textContent = String(val);
+    });
+  };
+}
 // =====================================================================
 // カメラ・QRスキャン
 // =====================================================================
+function facingLabel(){ return CAMERA_FACING === 'user' ? '内カメラ' : '外カメラ'; }
+function updateCamSwitchLabel(){
+  camSwitchEl.innerHTML = '📷 カメラ切替（現在：' + facingLabel() + '）';
+}
 async function startCamera(){
   if (typeof jsQR === 'undefined'){
     cameraErrorMsgEl.innerHTML = 'QR読み取りライブラリの読み込みに失敗しました。<br>インターネット接続を確認して、ページを再読み込みしてください。';
@@ -218,9 +394,12 @@ async function startCamera(){
     scanning = true;
     return;
   }
+  // 選択されたカメラ（内/外）を優先して起動。失敗時は徐々に条件を緩める。
+  const primary = CAMERA_FACING === 'user' ? 'user' : 'environment';
   const attempts = [
-    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-    { video: { facingMode: 'environment' } },
+    { video: { facingMode: { ideal: primary }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { video: { facingMode: primary } },
+    { video: { facingMode: { exact: primary } } },
     { video: true } // 最後の手段：使えるカメラを何でも使う
   ];
   let lastErr = null;
@@ -232,7 +411,8 @@ async function startCamera(){
       cameraStarted = true;
       scanning = true;
       frameCount = 0;
-      debugEl.textContent = 'カメラ起動OK。QRを探しています…';
+      cameraErrorEl.style.display = 'none';
+      debugEl.textContent = 'カメラ起動OK（' + facingLabel() + '）。QRを探しています…';
       requestAnimationFrame(tick);
       return;
     } catch(err){
@@ -242,7 +422,22 @@ async function startCamera(){
   cameraErrorEl.style.display = 'flex';
   debugEl.textContent = 'カメラ起動エラー：' + (lastErr ? (lastErr.name + ' ' + lastErr.message) : '不明');
 }
-
+// 内カメ⇔外カメ の切り替え
+async function switchCamera(){
+  CAMERA_FACING = (CAMERA_FACING === 'environment') ? 'user' : 'environment';
+  localStorage.setItem(STORAGE_KEY_FACING, CAMERA_FACING);
+  updateCamSwitchLabel();
+  if (video.srcObject){
+    video.srcObject.getTracks().forEach(function(t){ t.stop(); });
+    video.srcObject = null;
+  }
+  cameraStarted = false;
+  scanning = false;
+  debugEl.textContent = facingLabel() + 'に切り替えています…';
+  await startCamera();
+}
+camSwitchEl.onclick = switchCamera;
+updateCamSwitchLabel();
 function tick(){
   if (video.readyState === video.HAVE_ENOUGH_DATA && scanning){
     canvas.width = video.videoWidth;
@@ -258,7 +453,6 @@ function tick(){
   }
   requestAnimationFrame(tick);
 }
-
 function handleScan(data){
   scanning = false;
   frameEl.classList.remove('pulse');
@@ -273,7 +467,6 @@ function handleScan(data){
   lateState = null;
   showChoose();
 }
-
 // =====================================================================
 // 画面: 初期設定（Webhook URL・校舎名をこの端末に保存）
 // =====================================================================
@@ -287,18 +480,24 @@ function showSetupForm(){
     <input type="text" class="ov-input" id="in-webhook" placeholder="https://script.google.com/macros/s/.../exec" style="font-size:14px;">
     <label class="ov-label">校舎名</label>
     <input type="text" class="ov-input" id="in-branch">
+    <label class="ov-label">起動時のカメラ</label>
+    <select class="ov-input" id="in-facing">
+      <option value="environment">外カメラ（背面）</option>
+      <option value="user">内カメラ（前面）</option>
+    </select>
     <div class="ov-error" id="err-setup"></div>
     <div class="ov-actions">
       <button class="btn btn-primary" id="btn-save-setup">保存してはじめる</button>
     </div>
   `;
-  // 値はinnerHTMLに直接埋め込まず、プロパティ経由でセット（HTML崩れ防止）
   document.getElementById('in-webhook').value = existingWebhook;
   document.getElementById('in-branch').value = existingBranch;
+  document.getElementById('in-facing').value = CAMERA_FACING;
   openOverlay();
   document.getElementById('btn-save-setup').onclick = () => {
     const webhook = document.getElementById('in-webhook').value.trim();
     const branch = document.getElementById('in-branch').value.trim();
+    const facing = document.getElementById('in-facing').value;
     if (!webhook.startsWith('https://')){
       document.getElementById('err-setup').textContent = 'Webhook URLが正しくありません（https://で始まるURLを入力してください）';
       return;
@@ -309,6 +508,9 @@ function showSetupForm(){
     }
     localStorage.setItem(STORAGE_KEY_WEBHOOK, webhook);
     localStorage.setItem(STORAGE_KEY_BRANCH, branch);
+    localStorage.setItem(STORAGE_KEY_FACING, facing);
+    CAMERA_FACING = facing;
+    updateCamSwitchLabel();
     applyConfig(webhook, branch);
     closeOverlay();
     startCamera();
@@ -319,7 +521,6 @@ function applyConfig(webhook, branch){
   BRANCH_NAME = branch;
   document.getElementById('branch-label').textContent = BRANCH_NAME + ' 出退勤';
 }
-
 // =====================================================================
 // 画面: 出勤 / 遅刻 / 退勤 の選択
 // =====================================================================
@@ -343,22 +544,32 @@ function showChoose(){
   document.getElementById('btn-checkout').onclick = showCheckoutForm;
   document.getElementById('btn-cancel-choose').onclick = resetToIdle;
 }
-
 // =====================================================================
-// 画面: 出勤フォーム（業務開始時間 — QR読み取り時刻より後のみ）
+// 読み取り時刻を「分」単位に切り捨てたDateを返す
+//   例) 14:32:15 → 14:32:00
+//   これにより「同じ分（14:32）」の入力を許可し、前の分（14:31）は不可にする
+// =====================================================================
+function scanFloorMinute(){
+  const d = new Date(scanTime);
+  d.setSeconds(0, 0);
+  return d;
+}
+// =====================================================================
+// 画面: 出勤フォーム（業務開始時間 — 読み取り時刻の「分」以降のみ）
 // =====================================================================
 function showCheckinForm(){
   const minHHMM = toHHMM(scanTime);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（出勤）';
   ovBodyEl.innerHTML = `
-    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} より後の時間のみ）</label>
-    <input type="time" class="ov-input" id="in-start" value="${minHHMM}" min="${minHHMM}">
+    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} の分 ${minHHMM} 以降）</label>
+    ${timeFieldHtml('in-start', minHHMM)}
     <div class="ov-error" id="err-start"></div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
       <button class="btn btn-primary" id="btn-submit">登録する</button>
     </div>
   `;
+  attachTimeField('in-start', minHHMM, null, '業務開始時間');
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-submit').onclick = () => {
     const hhmm = document.getElementById('in-start').value;
@@ -367,47 +578,43 @@ function showCheckinForm(){
       return;
     }
     const workStart = combineTodayTime(hhmm);
-    if (workStart < scanTime){
-      document.getElementById('err-start').textContent = '読み取り時刻より後の時間を入力してください';
+    if (workStart < scanFloorMinute()){
+      document.getElementById('err-start').textContent = '読み取り時刻（分）以降の時間を入力してください';
       return;
     }
     submitCheckin(workStart);
   };
 }
-
 // =====================================================================
-// 遅刻フロー ①: 遅刻分を数値入力
+// 遅刻フロー ①: 遅刻分をスクロールで選択
 // =====================================================================
 function showLateMinutesForm(){
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（遅刻）';
   ovBodyEl.innerHTML = `
     <label class="ov-label">遅刻分（授業開始時刻から何分遅れたか）</label>
-    <input type="number" class="ov-input" id="in-late-min" min="1" step="1" inputmode="numeric" placeholder="例：3">
+    ${numberFieldHtml('in-late-min', 1, '分')}
     <div class="ov-error" id="err-late-min"></div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
       <button class="btn btn-primary" id="btn-next">次へ</button>
     </div>
   `;
+  attachNumberField('in-late-min', 1, 180, 1, '分', '遅刻分を選択');
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-next').onclick = () => {
     const val = parseInt(document.getElementById('in-late-min').value, 10);
     if (isNaN(val) || val <= 0){
-      document.getElementById('err-late-min').textContent = '1以上の数値を入力してください';
+      document.getElementById('err-late-min').textContent = '1以上の数値を選択してください';
       return;
     }
     lateState = { lateMinutes: val, lateResponse: null, substituteId: null, substituteName: null };
-    // GAS側と同じ判定ロジックをフロントでも実施（表示・分岐用）
     if (val <= LATE_THRESHOLD_MIN){
-      // 5分以内：代講なし。追加入力なしで業務開始時間へ
-      showLateStartForm();
+      showLateStartForm();       // 5分以内：代講なし
     } else {
-      // 5分超：遅刻時対応を選択
-      showLateResponseForm();
+      showLateResponseForm();    // 5分超：遅刻時対応を選択
     }
   };
 }
-
 // =====================================================================
 // 遅刻フロー ②(5分超のみ): 遅刻時対応を選択
 // =====================================================================
@@ -439,7 +646,6 @@ function showLateResponseForm(){
     };
   });
 }
-
 // =====================================================================
 // 遅刻フロー ③(代講対応のみ): 代講者を講師一覧DBから選択
 // =====================================================================
@@ -464,10 +670,7 @@ async function showSubstituteForm(){
     document.getElementById('btn-retry').onclick = showSubstituteForm;
     return;
   }
-
-  // 本人はサーバー側で除外済みだが、念のためフロントでも除外
   teachers = teachers.filter(t => t.id && t.name);
-
   if (teachers.length === 0){
     ovBodyEl.innerHTML = `
       <div class="ov-error">選択できる代講者がいません（本人以外の講師が見つかりません）</div>
@@ -478,7 +681,6 @@ async function showSubstituteForm(){
     document.getElementById('btn-cancel').onclick = resetToIdle;
     return;
   }
-
   const options = teachers.map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join('');
   ovBodyEl.innerHTML = `
     <div class="ov-note warn">代講対応：代講した講師を選択してください（本人は選べません）。</div>
@@ -506,7 +708,6 @@ async function showSubstituteForm(){
     showLateStartForm();
   };
 }
-
 // =====================================================================
 // 遅刻フロー ④: 業務開始時間を入力して登録
 // =====================================================================
@@ -521,14 +722,15 @@ function showLateStartForm(){
   }
   ovBodyEl.innerHTML = `
     <div class="ov-note">${summary}</div>
-    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} より後の時間のみ）</label>
-    <input type="time" class="ov-input" id="in-start" value="${minHHMM}" min="${minHHMM}">
+    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} の分 ${minHHMM} 以降）</label>
+    ${timeFieldHtml('in-start', minHHMM)}
     <div class="ov-error" id="err-start"></div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
       <button class="btn btn-primary" id="btn-submit">登録する</button>
     </div>
   `;
+  attachTimeField('in-start', minHHMM, null, '業務開始時間');
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-submit').onclick = () => {
     const hhmm = document.getElementById('in-start').value;
@@ -537,29 +739,28 @@ function showLateStartForm(){
       return;
     }
     const workStart = combineTodayTime(hhmm);
-    if (workStart < scanTime){
-      document.getElementById('err-start').textContent = '読み取り時刻より後の時間を入力してください';
+    if (workStart < scanFloorMinute()){
+      document.getElementById('err-start').textContent = '読み取り時刻（分）以降の時間を入力してください';
       return;
     }
     submitLate(workStart);
   };
 }
-
 // =====================================================================
-// 画面: 退勤フォーム（業務終了時間 — QR読み取り時刻より前のみ、
+// 画面: 退勤フォーム（業務終了時間 — 読み取り時刻の「分」以前のみ、
 //        実施コマ数・休憩時間・Comiru報告書チェック）
 // =====================================================================
 function showCheckoutForm(){
   const maxHHMM = toHHMM(scanTime);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
   ovBodyEl.innerHTML = `
-    <label class="ov-label">業務終了時間（読み取り時刻 ${fmtTime(scanTime)} より前の時間のみ）</label>
-    <input type="time" class="ov-input" id="in-end" value="${maxHHMM}" max="${maxHHMM}">
+    <label class="ov-label">業務終了時間（読み取り時刻 ${fmtTime(scanTime)} の分 ${maxHHMM} 以前）</label>
+    ${timeFieldHtml('in-end', maxHHMM)}
     <div class="ov-error" id="err-end"></div>
     <label class="ov-label">実施コマ数</label>
-    <input type="number" class="ov-input" id="in-lessons" min="0" step="1" value="0" inputmode="numeric">
+    ${numberFieldHtml('in-lessons', 0, 'コマ')}
     <label class="ov-label">休憩時間（分）</label>
-    <input type="number" class="ov-input" id="in-break" min="0" step="5" value="0" inputmode="numeric">
+    ${numberFieldHtml('in-break', 0, '分')}
     <label class="ov-check">
       <input type="checkbox" id="in-comiru">
       Comiru報告書を提出済み
@@ -569,6 +770,9 @@ function showCheckoutForm(){
       <button class="btn btn-primary" id="btn-submit">登録する</button>
     </div>
   `;
+  attachTimeField('in-end', null, maxHHMM, '業務終了時間');
+  attachNumberField('in-lessons', 0, 20, 1, 'コマ', '実施コマ数を選択');
+  attachNumberField('in-break', 0, 180, 5, '分', '休憩時間を選択');
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-submit').onclick = () => {
     const hhmm = document.getElementById('in-end').value;
@@ -580,8 +784,8 @@ function showCheckoutForm(){
     const lessons = parseInt(document.getElementById('in-lessons').value, 10);
     const breakMin = parseInt(document.getElementById('in-break').value, 10);
     const comiruDone = document.getElementById('in-comiru').checked;
-    if (workEnd > scanTime){
-      document.getElementById('err-end').textContent = '読み取り時刻より前の時間を入力してください';
+    if (workEnd > scanFloorMinute()){
+      document.getElementById('err-end').textContent = '読み取り時刻（分）以前の時間を入力してください';
       return;
     }
     if (isNaN(lessons) || lessons < 0 || isNaN(breakMin) || breakMin < 0){
@@ -597,11 +801,8 @@ function showCheckoutForm(){
     submitCheckout(workEnd, lessons, breakMin, comiruDone);
   };
 }
-
 // =====================================================================
 // 通信（JSONP）
-// Apps ScriptのWeb Appは、ブラウザからのfetch(POST)だとCORSでブロックされる
-// 仕様のため、<script>タグ経由のJSONP（GET）で通信します。
 // =====================================================================
 function jsonpRequest(params){
   return new Promise((resolve, reject) => {
@@ -629,7 +830,6 @@ function jsonpRequest(params){
     document.body.appendChild(script);
   });
 }
-
 async function submitCheckin(workStart){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
@@ -646,7 +846,6 @@ async function submitCheckin(workStart){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
-
 async function submitLate(workStart){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
@@ -659,7 +858,6 @@ async function submitLate(workStart){
       workStartTime: workStart.toISOString(),
       lateMinutes: String(lateState.lateMinutes)
     };
-    // 5分超のみ対応・代講者を送る（5分以内は遅刻分のみ）
     if (lateState.lateMinutes > LATE_THRESHOLD_MIN){
       params.lateResponse = lateState.lateResponse || '';
       if (lateState.lateResponse === '代講対応' && lateState.substituteId){
@@ -672,7 +870,6 @@ async function submitLate(workStart){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
-
 async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
@@ -692,7 +889,6 @@ async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
-
 // =====================================================================
 // 画面: 結果表示
 // =====================================================================
@@ -700,7 +896,6 @@ function showResult(json, kind){
   ovTeacherEl.textContent = '';
   if (json && json.ok){
     if (kind === 'late'){
-      // 遅刻：運営管理者への確認メッセージを必ず表示
       ovBodyEl.innerHTML = `
         <div class="ov-result late">
           <div class="name">${escapeHtml(json.name)} 先生 遅刻を記録しました</div>
@@ -708,7 +903,6 @@ function showResult(json, kind){
           <div class="msg">${escapeHtml(LATE_ADMIN_MESSAGE).replace(/\n/g,'<br>')}</div>
         </div>
       `;
-      // 遅刻は確認を促すため、少し長めに表示
       setTimeout(resetToIdle, 6500);
       return;
     }
@@ -733,7 +927,6 @@ function showResult(json, kind){
     setTimeout(resetToIdle, 3600);
   }
 }
-
 function showErrorScreen(message){
   ovTeacherEl.textContent = '';
   ovBodyEl.innerHTML = `
@@ -745,7 +938,6 @@ function showErrorScreen(message){
   openOverlay();
   setTimeout(resetToIdle, 2600);
 }
-
 // =====================================================================
 // 共通
 // =====================================================================
@@ -753,6 +945,7 @@ function openOverlay(){ overlayEl.classList.add('show'); }
 function closeOverlay(){ overlayEl.classList.remove('show'); }
 function resetToIdle(){
   closeOverlay();
+  wheelEl.classList.remove('show');
   currentTeacher = null;
   scanTime = null;
   lateState = null;
@@ -779,7 +972,6 @@ function escapeHtml(str){
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
-
 // =====================================================================
 // 起動処理
 // =====================================================================
