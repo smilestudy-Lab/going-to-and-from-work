@@ -827,10 +827,6 @@ function showCheckoutForm(){
         </div>
         <label class="ov-label">事務作業内容（事務時間を入力した場合は必須）</label>
         <div class="tag-grid" id="jimu-type-grid">${typeButtons}</div>
-        <label class="ov-check">
-          <input type="checkbox" id="in-comiru">
-          Comiru報告書を提出済み
-        </label>
       </div>
     </div>
     <div class="ov-error" id="err-checkout"></div>
@@ -901,8 +897,7 @@ function showCheckoutForm(){
       errEl.textContent = '事務作業内容を選択した場合は、事務時間を入力してください';
       return;
     }
-    const comiruDone = document.getElementById('in-comiru').checked;
-    submitCheckout(slots, { j1s, j1e, j2s, j2e }, types, comiruDone);
+    submitCheckout(slots, { j1s, j1e, j2s, j2e }, types);
   };
 }
 // =====================================================================
@@ -972,7 +967,7 @@ async function submitLate(){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
-async function submitCheckout(slots, jimu, types, comiruDone){
+async function submitCheckout(slots, jimu, types){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
     const json = await jsonpRequest({
@@ -986,8 +981,7 @@ async function submitCheckout(slots, jimu, types, comiruDone){
       jimu1End: jimu.j1e || '',
       jimu2Start: jimu.j2s || '',
       jimu2End: jimu.j2e || '',
-      jimuTypes: types.join(','),
-      comiruDone: String(comiruDone)
+      jimuTypes: types.join(',')
     });
     showResult(json, 'checkout');
   } catch(err){
