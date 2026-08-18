@@ -90,6 +90,30 @@
     display:flex; align-items:center; justify-content:space-between; cursor:pointer;
   }
   .tapfield .tf-ico{ font-size:15px; color:var(--muted); }
+  .tapfield.small{ padding:12px 14px; font-size:20px; }
+  /* 実施コマ（時間帯）・事務作業内容の選択ボタン */
+  .slot-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:4px; }
+  .slot-btn{
+    padding:13px 8px; border-radius:10px; border:1px solid #2c3f63;
+    background:#0f1a30; color:var(--muted); font-size:16px; cursor:pointer;
+    font-family:'Noto Sans JP',sans-serif; font-variant-numeric:tabular-nums; text-align:center;
+  }
+  .slot-btn.on{ background:var(--gold); border-color:var(--gold); color:#1c1400; font-weight:700; }
+  .tag-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:4px; }
+  .tag-btn{
+    padding:12px 6px; border-radius:10px; border:1px solid #2c3f63;
+    background:#0f1a30; color:var(--muted); font-size:15px; cursor:pointer;
+    font-family:'Noto Sans JP',sans-serif; text-align:center;
+  }
+  .tag-btn.on{ background:var(--teal); border-color:var(--teal); color:#04211d; font-weight:700; }
+  /* 事務時間の行（開始〜終了＋クリア） */
+  .jimu-row{ display:flex; align-items:center; gap:8px; }
+  .jimu-row .tilde{ color:var(--muted); font-size:18px; flex:0 0 auto; }
+  .mini-clear{
+    flex:0 0 auto; background:transparent; border:1px solid #2c3f63; color:var(--muted);
+    border-radius:8px; padding:10px 12px; font-size:13px; cursor:pointer;
+    font-family:'Noto Sans JP',sans-serif;
+  }
   .ov-check{ display:flex; align-items:center; gap:10px; margin-top:20px; font-size:16px; }
   .ov-check input{ width:22px; height:22px; }
   .ov-actions{ display:flex; gap:12px; margin-top:26px; }
@@ -110,9 +134,11 @@
   .ov-result .name{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:28px; }
   .ov-result .time{ color:var(--muted); font-size:16px; margin-top:8px; }
   .ov-result .msg{ font-size:16px; margin-top:16px; line-height:1.8; color:var(--paper); }
+  .ov-result .msg.left{ text-align:left; }
   .ov-result.ok .name{ color:var(--gold); }
   .ov-result.late .name{ color:var(--orange); }
   .ov-result.checkout .name{ color:var(--teal); }
+  .ov-result.review .name{ color:var(--orange); }
   .ov-result.error .name{ color:var(--red); }
   /* ===== スクロール式ホイールピッカー（時間・数値 共通） ===== */
   #wheel{
@@ -204,6 +230,23 @@ let BRANCH_NAME = '';
 let CAMERA_FACING = localStorage.getItem(STORAGE_KEY_FACING) || 'environment';
 // 遅刻の判定しきい値（分）。5分以内は代講なし。
 const LATE_THRESHOLD_MIN = 5;
+// =====================================================================
+// 実施コマ（時間帯）
+//   通常日・土日祝・講習期間で表示を分けず、常に全時間帯を表示。
+//   key はGASへ送るコード。label は画面表示。
+// =====================================================================
+const LESSON_SLOTS = [
+  { key: '0930-1050', label: '09:30 - 10:50' },
+  { key: '1100-1220', label: '11:00 - 12:20' },
+  { key: '1230-1350', label: '12:30 - 13:50' },
+  { key: '1400-1520', label: '14:00 - 15:20' },
+  { key: '1530-1650', label: '15:30 - 16:50' },
+  { key: '1700-1820', label: '17:00 - 18:20' },
+  { key: '1830-1950', label: '18:30 - 19:50' },
+  { key: '2000-2120', label: '20:00 - 21:20' }
+];
+// 事務作業内容（固定3択・自由記述なし・「その他」なし）
+const JIMU_TYPE_OPTIONS = ['定例面談', '研修', '管理者依頼事務'];
 // 講師向けランダムメッセージ
 const CHECKIN_MESSAGES = [
   '今日もよろしくお願いします！',
@@ -217,16 +260,9 @@ const CHECKOUT_MESSAGES = [
 ];
 const LATE_ADMIN_MESSAGE =
   '遅刻内容を記録しました。\n業務に入る前に、運営管理者へ一度状況を説明し、対応内容の確認を受けてから業務に入ってください。';
+const REVIEW_MESSAGE =
+  '勤怠は提出できましたが、管理者確認が必要です。管理者確認が完了するまで給与計算への反映は保留されます。管理者に確認をお願いします。';
 function pickRandom(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
-// 実施コマ数に応じて必要な休憩時間（分）の下限を返す
-function requiredBreakMinutes(lessons){
-  if (lessons >= 6) return 60;
-  if (lessons >= 5) return 45;
-  if (lessons >= 4) return 30;
-  if (lessons >= 3) return 20;
-  if (lessons >= 2) return 10;
-  return 0;
-}
 // ----- DOM参照 -----
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -255,9 +291,6 @@ setInterval(updateClock, 1000);
 updateClock();
 // =====================================================================
 // スクロール式ホイールピッカー（汎用）
-//   数字をスクロールして選び「決定」で確定します。
-//   - 時間ピッカー: 時・分の2列
-//   - 数値ピッカー: 1列（コマ数・休憩時間・遅刻分など）
 // =====================================================================
 const ITEM_H = 52;
 const wheelEl = document.getElementById('wheel');
@@ -273,8 +306,6 @@ function markWheelSel(col){
   idx = Math.max(0, Math.min(items.length - 1, idx));
   items.forEach(function(el, i){ el.classList.toggle('sel', i === idx); });
 }
-// cols: [{ values:[表示文字列...], initialIndex, unit(任意), sep(任意 既定':') }]
-// onConfirm(indices[]) に各列の選択インデックスを渡す
 function openWheel(title, cols, onConfirm){
   wheelTitleEl.textContent = title;
   let html = '<div class="wheel-highlight"></div>';
@@ -298,7 +329,6 @@ function openWheel(title, cols, onConfirm){
     });
   });
   wheelEl.classList.add('show');
-  // 表示後にスクロール位置を設定（非表示中はscrollTopが効かないため）
   requestAnimationFrame(function(){
     colEls.forEach(function(col, ci){
       col.scrollTop = (cols[ci].initialIndex || 0) * ITEM_H;
@@ -331,18 +361,7 @@ function openTimeWheel(initial, min, max, title, onConfirm){
       onConfirm(pad2(Math.floor(total / 60)) + ':' + pad2(total % 60));
     });
 }
-// 数値ホイール（1列）。min〜maxをstep刻みで表示。
-function openNumberWheel(initial, min, max, step, unit, title, onConfirm){
-  const values = [];
-  for (let v = min; v <= max; v += step) values.push(String(v));
-  let idx = Math.round((initial - min) / step);
-  idx = Math.max(0, Math.min(values.length - 1, idx));
-  openWheel(title, [{ values: values, initialIndex: idx, unit: unit }], function(idxs){
-    onConfirm(min + idxs[0] * step);
-  });
-}
-// --- タップフィールド（共通） ---
-// 実体の値は同じidの hidden input に入るので、既存の .value 参照はそのまま動きます。
+// --- タップフィールド（必須の時間入力） ---
 function timeFieldHtml(fieldId, value){
   return '<div class="tapfield" id="' + fieldId + '-field">' +
            '<span class="tf-val">' + value + '</span><span class="tf-ico">&#9660; スクロール</span>' +
@@ -359,22 +378,33 @@ function attachTimeField(fieldId, min, max, title){
     });
   };
 }
-function numberFieldHtml(fieldId, value, unit){
-  return '<div class="tapfield" id="' + fieldId + '-field">' +
-           '<span><span class="tf-val">' + value + '</span> ' + unit + '</span>' +
-           '<span class="tf-ico">&#9660; スクロール</span>' +
+// --- タップフィールド（任意の時間入力：事務時間用。未入力は「--:--」） ---
+function optTimeFieldHtml(fieldId){
+  return '<div class="tapfield small" id="' + fieldId + '-field" style="flex:1;">' +
+           '<span class="tf-val" style="color:var(--muted);">--:--</span>' +
+           '<span class="tf-ico">&#9660;</span>' +
          '</div>' +
-         '<input type="hidden" id="' + fieldId + '" value="' + value + '">';
+         '<input type="hidden" id="' + fieldId + '" value="">';
 }
-function attachNumberField(fieldId, min, max, step, unit, title){
+function attachOptTimeField(fieldId, title){
   const field = document.getElementById(fieldId + '-field');
   const hidden = document.getElementById(fieldId);
   field.onclick = function(){
-    openNumberWheel(Number(hidden.value), min, max, step, unit, title, function(val){
-      hidden.value = String(val);
-      field.querySelector('.tf-val').textContent = String(val);
+    openTimeWheel(hidden.value || toHHMM(scanTime), null, null, title, function(v){
+      hidden.value = v;
+      const val = field.querySelector('.tf-val');
+      val.textContent = v;
+      val.style.color = '';
     });
   };
+}
+function clearOptTimeField(fieldId){
+  const field = document.getElementById(fieldId + '-field');
+  const hidden = document.getElementById(fieldId);
+  hidden.value = '';
+  const val = field.querySelector('.tf-val');
+  val.textContent = '--:--';
+  val.style.color = 'var(--muted)';
 }
 // =====================================================================
 // カメラ・QRスキャン
@@ -394,13 +424,12 @@ async function startCamera(){
     scanning = true;
     return;
   }
-  // 選択されたカメラ（内/外）を優先して起動。失敗時は徐々に条件を緩める。
   const primary = CAMERA_FACING === 'user' ? 'user' : 'environment';
   const attempts = [
     { video: { facingMode: { ideal: primary }, width: { ideal: 1280 }, height: { ideal: 720 } } },
     { video: { facingMode: primary } },
     { video: { facingMode: { exact: primary } } },
-    { video: true } // 最後の手段：使えるカメラを何でも使う
+    { video: true }
   ];
   let lastErr = null;
   for (const constraints of attempts){
@@ -422,7 +451,6 @@ async function startCamera(){
   cameraErrorEl.style.display = 'flex';
   debugEl.textContent = 'カメラ起動エラー：' + (lastErr ? (lastErr.name + ' ' + lastErr.message) : '不明');
 }
-// 内カメ⇔外カメ の切り替え
 async function switchCamera(){
   CAMERA_FACING = (CAMERA_FACING === 'environment') ? 'user' : 'environment';
   localStorage.setItem(STORAGE_KEY_FACING, CAMERA_FACING);
@@ -546,8 +574,6 @@ function showChoose(){
 }
 // =====================================================================
 // 読み取り時刻を「分」単位に切り捨てたDateを返す
-//   例) 14:32:15 → 14:32:00
-//   これにより「同じ分（14:32）」の入力を許可し、前の分（14:31）は不可にする
 // =====================================================================
 function scanFloorMinute(){
   const d = new Date(scanTime);
@@ -555,35 +581,22 @@ function scanFloorMinute(){
   return d;
 }
 // =====================================================================
-// 画面: 出勤フォーム（業務開始時間 — 読み取り時刻の「分」以降のみ）
+// 画面: 出勤確認
+//   業務開始時間の入力はなし。退勤時に実施コマ・事務時間から
+//   「最初の勤務イベントの最大5分前」がGASで自動登録される。
 // =====================================================================
 function showCheckinForm(){
-  const minHHMM = toHHMM(scanTime);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（出勤）';
   ovBodyEl.innerHTML = `
-    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} の分 ${minHHMM} 以降）</label>
-    ${timeFieldHtml('in-start', minHHMM)}
-    <div class="ov-error" id="err-start"></div>
+    <div class="ov-note">出勤時間：${fmtTime(scanTime)}<br>
+    業務開始時間・業務終了時間は、退勤時に実施コマ・事務時間から自動で登録されます。</div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
-      <button class="btn btn-primary" id="btn-submit">登録する</button>
+      <button class="btn btn-primary" id="btn-submit">出勤を記録する</button>
     </div>
   `;
-  attachTimeField('in-start', minHHMM, null, '業務開始時間');
   document.getElementById('btn-cancel').onclick = resetToIdle;
-  document.getElementById('btn-submit').onclick = () => {
-    const hhmm = document.getElementById('in-start').value;
-    if (!hhmm){
-      document.getElementById('err-start').textContent = '時間を入力してください';
-      return;
-    }
-    const workStart = combineTodayTime(hhmm);
-    if (workStart < scanFloorMinute()){
-      document.getElementById('err-start').textContent = '読み取り時刻（分）以降の時間を入力してください';
-      return;
-    }
-    submitCheckin(workStart);
-  };
+  document.getElementById('btn-submit').onclick = () => submitCheckin();
 }
 // =====================================================================
 // 遅刻フロー ①: 遅刻分をスクロールで選択
@@ -614,6 +627,33 @@ function showLateMinutesForm(){
       showLateResponseForm();    // 5分超：遅刻時対応を選択
     }
   };
+}
+// 数値ホイール用フィールド（遅刻分で使用）
+function numberFieldHtml(fieldId, value, unit){
+  return '<div class="tapfield" id="' + fieldId + '-field">' +
+           '<span><span class="tf-val">' + value + '</span> ' + unit + '</span>' +
+           '<span class="tf-ico">&#9660; スクロール</span>' +
+         '</div>' +
+         '<input type="hidden" id="' + fieldId + '" value="' + value + '">';
+}
+function attachNumberField(fieldId, min, max, step, unit, title){
+  const field = document.getElementById(fieldId + '-field');
+  const hidden = document.getElementById(fieldId);
+  field.onclick = function(){
+    openNumberWheel(Number(hidden.value), min, max, step, unit, title, function(val){
+      hidden.value = String(val);
+      field.querySelector('.tf-val').textContent = String(val);
+    });
+  };
+}
+function openNumberWheel(initial, min, max, step, unit, title, onConfirm){
+  const values = [];
+  for (let v = min; v <= max; v += step) values.push(String(v));
+  let idx = Math.round((initial - min) / step);
+  idx = Math.max(0, Math.min(values.length - 1, idx));
+  openWheel(title, [{ values: values, initialIndex: idx, unit: unit }], function(idxs){
+    onConfirm(min + idxs[0] * step);
+  });
 }
 // =====================================================================
 // 遅刻フロー ②(5分超のみ): 遅刻時対応を選択
@@ -709,10 +749,9 @@ async function showSubstituteForm(){
   };
 }
 // =====================================================================
-// 遅刻フロー ④: 業務開始時間を入力して登録
+// 遅刻フロー ④: 内容を確認して登録（業務開始時間の入力はなし・自動計算）
 // =====================================================================
 function showLateStartForm(){
-  const minHHMM = toHHMM(scanTime);
   let summary = `遅刻 ${lateState.lateMinutes} 分`;
   if (lateState.lateMinutes <= LATE_THRESHOLD_MIN){
     summary += '（5分以内｜代講なし）';
@@ -722,83 +761,127 @@ function showLateStartForm(){
   }
   ovBodyEl.innerHTML = `
     <div class="ov-note">${summary}</div>
-    <label class="ov-label">業務開始時間（読み取り時刻 ${fmtTime(scanTime)} の分 ${minHHMM} 以降）</label>
-    ${timeFieldHtml('in-start', minHHMM)}
-    <div class="ov-error" id="err-start"></div>
+    <div class="ov-note">出勤時間：${fmtTime(scanTime)}<br>
+    業務開始時間・業務終了時間は、退勤時に実施コマ・事務時間から自動で登録されます。</div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
       <button class="btn btn-primary" id="btn-submit">登録する</button>
     </div>
   `;
-  attachTimeField('in-start', minHHMM, null, '業務開始時間');
   document.getElementById('btn-cancel').onclick = resetToIdle;
-  document.getElementById('btn-submit').onclick = () => {
-    const hhmm = document.getElementById('in-start').value;
-    if (!hhmm){
-      document.getElementById('err-start').textContent = '時間を入力してください';
-      return;
-    }
-    const workStart = combineTodayTime(hhmm);
-    if (workStart < scanFloorMinute()){
-      document.getElementById('err-start').textContent = '読み取り時刻（分）以降の時間を入力してください';
-      return;
-    }
-    submitLate(workStart);
-  };
+  document.getElementById('btn-submit').onclick = () => submitLate();
 }
 // =====================================================================
-// 画面: 退勤フォーム（業務終了時間 — 読み取り時刻の「分」以前のみ、
-//        実施コマ数・休憩時間・Comiru報告書チェック）
+// 画面: 退勤フォーム
+//   - 業務開始時間・業務終了時間の入力はなし（GASが勤務イベントから自動計算：
+//     最初のイベントの最大5分前〜最後のイベントの最大5分後）
+//   - 実施コマ：時間帯ボタンで選択（常に全時間帯を表示）
+//   - 事務時間①②（任意・開始/終了）＋ 事務作業内容（事務時間入力時は必須）
+//   - 休憩時間は入力しない（GAS側で勤務イベントの空白から自動計算）
 // =====================================================================
 function showCheckoutForm(){
-  const maxHHMM = toHHMM(scanTime);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
+  const slotButtons = LESSON_SLOTS.map(s =>
+    `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`
+  ).join('');
+  const typeButtons = JIMU_TYPE_OPTIONS.map(t =>
+    `<button type="button" class="tag-btn" data-type="${escapeHtml(t)}">${escapeHtml(t)}</button>`
+  ).join('');
   ovBodyEl.innerHTML = `
-    <label class="ov-label">業務終了時間（読み取り時刻 ${fmtTime(scanTime)} の分 ${maxHHMM} 以前）</label>
-    ${timeFieldHtml('in-end', maxHHMM)}
-    <div class="ov-error" id="err-end"></div>
-    <label class="ov-label">実施コマ数</label>
-    ${numberFieldHtml('in-lessons', 0, 'コマ')}
-    <label class="ov-label">休憩時間（分）</label>
-    ${numberFieldHtml('in-break', 0, '分')}
+    <div class="ov-note">退勤時間：${fmtTime(scanTime)}<br>
+    業務開始時間・業務終了時間・休憩時間は、実施コマと事務時間から自動で計算されます。</div>
+    <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）</label>
+    <div class="slot-grid" id="slot-grid">${slotButtons}</div>
+    <label class="ov-label">事務時間①（任意）</label>
+    <div class="jimu-row">
+      ${optTimeFieldHtml('in-jimu1-start')}
+      <span class="tilde">〜</span>
+      ${optTimeFieldHtml('in-jimu1-end')}
+      <button type="button" class="mini-clear" id="btn-clear-jimu1">クリア</button>
+    </div>
+    <label class="ov-label">事務時間②（任意）</label>
+    <div class="jimu-row">
+      ${optTimeFieldHtml('in-jimu2-start')}
+      <span class="tilde">〜</span>
+      ${optTimeFieldHtml('in-jimu2-end')}
+      <button type="button" class="mini-clear" id="btn-clear-jimu2">クリア</button>
+    </div>
+    <label class="ov-label">事務作業内容（事務時間を入力した場合は必須）</label>
+    <div class="tag-grid" id="jimu-type-grid">${typeButtons}</div>
     <label class="ov-check">
       <input type="checkbox" id="in-comiru">
       Comiru報告書を提出済み
     </label>
+    <div class="ov-error" id="err-checkout"></div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
       <button class="btn btn-primary" id="btn-submit">登録する</button>
     </div>
   `;
-  attachTimeField('in-end', null, maxHHMM, '業務終了時間');
-  attachNumberField('in-lessons', 0, 20, 1, 'コマ', '実施コマ数を選択');
-  attachNumberField('in-break', 0, 180, 5, '分', '休憩時間を選択');
+  attachOptTimeField('in-jimu1-start', '事務時間① 開始');
+  attachOptTimeField('in-jimu1-end', '事務時間① 終了');
+  attachOptTimeField('in-jimu2-start', '事務時間② 開始');
+  attachOptTimeField('in-jimu2-end', '事務時間② 終了');
+  document.getElementById('btn-clear-jimu1').onclick = function(){
+    clearOptTimeField('in-jimu1-start');
+    clearOptTimeField('in-jimu1-end');
+  };
+  document.getElementById('btn-clear-jimu2').onclick = function(){
+    clearOptTimeField('in-jimu2-start');
+    clearOptTimeField('in-jimu2-end');
+  };
+  ovBodyEl.querySelectorAll('#slot-grid .slot-btn').forEach(function(btn){
+    btn.onclick = function(){ btn.classList.toggle('on'); };
+  });
+  ovBodyEl.querySelectorAll('#jimu-type-grid .tag-btn').forEach(function(btn){
+    btn.onclick = function(){ btn.classList.toggle('on'); };
+  });
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-submit').onclick = () => {
-    const hhmm = document.getElementById('in-end').value;
-    if (!hhmm){
-      document.getElementById('err-end').textContent = '時間を入力してください';
+    const errEl = document.getElementById('err-checkout');
+    errEl.textContent = '';
+    // 実施コマ（0コマも許可：事務のみ勤務の日があるため）
+    const slots = Array.prototype.map.call(
+      ovBodyEl.querySelectorAll('#slot-grid .slot-btn.on'),
+      function(b){ return b.getAttribute('data-slot'); }
+    );
+    // 事務時間①②：両方入力 or 両方未入力のみ許可。終了は開始より後。
+    const j1s = document.getElementById('in-jimu1-start').value;
+    const j1e = document.getElementById('in-jimu1-end').value;
+    const j2s = document.getElementById('in-jimu2-start').value;
+    const j2e = document.getElementById('in-jimu2-end').value;
+    if ((j1s && !j1e) || (!j1s && j1e)){
+      errEl.textContent = '事務時間①は開始・終了の両方を入力してください';
       return;
     }
-    const workEnd = combineTodayTime(hhmm);
-    const lessons = parseInt(document.getElementById('in-lessons').value, 10);
-    const breakMin = parseInt(document.getElementById('in-break').value, 10);
+    if ((j2s && !j2e) || (!j2s && j2e)){
+      errEl.textContent = '事務時間②は開始・終了の両方を入力してください';
+      return;
+    }
+    if (j1s && j1e && hm2min(j1e) <= hm2min(j1s)){
+      errEl.textContent = '事務時間①の終了は開始より後にしてください';
+      return;
+    }
+    if (j2s && j2e && hm2min(j2e) <= hm2min(j2s)){
+      errEl.textContent = '事務時間②の終了は開始より後にしてください';
+      return;
+    }
+    const jimuAny = (j1s && j1e) || (j2s && j2e);
+    // 事務作業内容（複数選択・固定3択）
+    const types = Array.prototype.map.call(
+      ovBodyEl.querySelectorAll('#jimu-type-grid .tag-btn.on'),
+      function(b){ return b.getAttribute('data-type'); }
+    );
+    if (jimuAny && types.length === 0){
+      errEl.textContent = '事務時間を入力した場合は、事務作業内容を選択してください';
+      return;
+    }
+    if (!jimuAny && types.length > 0){
+      errEl.textContent = '事務作業内容を選択した場合は、事務時間を入力してください';
+      return;
+    }
     const comiruDone = document.getElementById('in-comiru').checked;
-    if (workEnd > scanFloorMinute()){
-      document.getElementById('err-end').textContent = '読み取り時刻（分）以前の時間を入力してください';
-      return;
-    }
-    if (isNaN(lessons) || lessons < 0 || isNaN(breakMin) || breakMin < 0){
-      document.getElementById('err-end').textContent = 'コマ数・休憩時間は0以上の数値で入力してください';
-      return;
-    }
-    const reqBreak = requiredBreakMinutes(lessons);
-    if (breakMin < reqBreak){
-      document.getElementById('err-end').textContent =
-        `${lessons}コマの場合、休憩は${reqBreak}分以上必要です（現在${breakMin}分）。休憩を取得のうえ入力してください。`;
-      return;
-    }
-    submitCheckout(workEnd, lessons, breakMin, comiruDone);
+    submitCheckout(slots, { j1s, j1e, j2s, j2e }, types, comiruDone);
   };
 }
 // =====================================================================
@@ -830,7 +913,7 @@ function jsonpRequest(params){
     document.body.appendChild(script);
   });
 }
-async function submitCheckin(workStart){
+async function submitCheckin(){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
     const json = await jsonpRequest({
@@ -838,15 +921,14 @@ async function submitCheckin(workStart){
       teacherId: currentTeacher.id,
       teacherName: currentTeacher.name,
       branch: BRANCH_NAME,
-      scanTime: scanTime.toISOString(),
-      workStartTime: workStart.toISOString()
+      scanTime: scanTime.toISOString()
     });
     showResult(json, 'checkin');
   } catch(err){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
-async function submitLate(workStart){
+async function submitLate(){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
     const params = {
@@ -855,7 +937,6 @@ async function submitLate(workStart){
       teacherName: currentTeacher.name,
       branch: BRANCH_NAME,
       scanTime: scanTime.toISOString(),
-      workStartTime: workStart.toISOString(),
       lateMinutes: String(lateState.lateMinutes)
     };
     if (lateState.lateMinutes > LATE_THRESHOLD_MIN){
@@ -870,7 +951,7 @@ async function submitLate(workStart){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
 }
-async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
+async function submitCheckout(slots, jimu, types, comiruDone){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
   try{
     const json = await jsonpRequest({
@@ -879,9 +960,12 @@ async function submitCheckout(workEnd, lessons, breakMin, comiruDone){
       teacherName: currentTeacher.name,
       branch: BRANCH_NAME,
       scanTime: scanTime.toISOString(),
-      workEndTime: workEnd.toISOString(),
-      lessonCount: String(lessons),
-      breakMinutes: String(breakMin),
+      lessonSlots: slots.join(','),
+      jimu1Start: jimu.j1s || '',
+      jimu1End: jimu.j1e || '',
+      jimu2Start: jimu.j2s || '',
+      jimu2End: jimu.j2e || '',
+      jimuTypes: types.join(','),
       comiruDone: String(comiruDone)
     });
     showResult(json, 'checkout');
@@ -906,14 +990,43 @@ function showResult(json, kind){
       setTimeout(resetToIdle, 6500);
       return;
     }
-    const cls = kind === 'checkout' ? 'checkout' : 'ok';
-    const verb = kind === 'checkout' ? '退勤' : '出勤';
-    const msg = kind === 'checkout' ? pickRandom(CHECKOUT_MESSAGES) : pickRandom(CHECKIN_MESSAGES);
+    if (kind === 'checkout'){
+      const workInfo = (json.workStartTime && json.workEndTime)
+        ? '｜業務 ' + toHHMM(new Date(json.workStartTime)) + '〜' + toHHMM(new Date(json.workEndTime))
+        : '';
+      const breakInfo = workInfo + ((typeof json.breakMinutes === 'number')
+        ? '｜休憩 ' + json.breakMinutes + '分（自動計算）'
+        : '');
+      if (json.needsReview){
+        // 管理者確認が必要（提出は受け付け済み・給与反映は保留）
+        const reasons = (json.reviewReasons || [])
+          .map(function(r){ return '・' + escapeHtml(r); }).join('<br>');
+        ovBodyEl.innerHTML = `
+          <div class="ov-result review">
+            <div class="name">${escapeHtml(json.name)} 先生 退勤しました（管理者確認）</div>
+            <div class="time">${fmtTime(new Date(json.time))}${breakInfo}</div>
+            <div class="msg left">${reasons}<br><br>${escapeHtml(REVIEW_MESSAGE)}</div>
+          </div>
+        `;
+        setTimeout(resetToIdle, 9000);
+        return;
+      }
+      ovBodyEl.innerHTML = `
+        <div class="ov-result checkout">
+          <div class="name">${escapeHtml(json.name)} 先生 退勤しました</div>
+          <div class="time">${fmtTime(new Date(json.time))}${breakInfo}</div>
+          <div class="msg">${escapeHtml(pickRandom(CHECKOUT_MESSAGES))}</div>
+        </div>
+      `;
+      setTimeout(resetToIdle, 3600);
+      return;
+    }
+    // 出勤
     ovBodyEl.innerHTML = `
-      <div class="ov-result ${cls}">
-        <div class="name">${escapeHtml(json.name)} 先生 ${verb}しました</div>
+      <div class="ov-result ok">
+        <div class="name">${escapeHtml(json.name)} 先生 出勤しました</div>
         <div class="time">${fmtTime(new Date(json.time))}</div>
-        <div class="msg">${escapeHtml(msg)}</div>
+        <div class="msg">${escapeHtml(pickRandom(CHECKIN_MESSAGES))}</div>
       </div>
     `;
     setTimeout(resetToIdle, 3600);
