@@ -74,6 +74,19 @@
     padding:36px 32px;
     box-shadow:0 20px 60px rgba(0,0,0,.4);
   }
+  /* 退勤フォーム用ワイドカード（スクロールなしで収めるための2カラム） */
+  .card.wide{ width:min(96vw,900px); padding:24px 28px; }
+  .card.wide .ov-teacher{ font-size:22px; margin-bottom:8px; }
+  .card.wide .ov-label{ margin:10px 0 5px; }
+  .card.wide .slot-btn{ padding:10px 6px; font-size:15px; }
+  .card.wide .tag-btn{ padding:10px 4px; font-size:14px; }
+  .card.wide .tapfield.small{ padding:10px 12px; font-size:18px; }
+  .card.wide .ov-check{ margin-top:14px; }
+  .card.wide .ov-actions{ margin-top:14px; }
+  .card.wide .ov-error{ margin-top:6px; min-height:18px; }
+  .co-cols{ display:flex; gap:24px; align-items:flex-start; }
+  .co-col{ flex:1; min-width:0; }
+  @media (max-width:720px){ .co-cols{ flex-direction:column; gap:0; } }
   .ov-teacher{ font-family:'Zen Maru Gothic',sans-serif; font-weight:700; font-size:28px; text-align:center; margin-bottom:18px; }
   .ov-body{ font-size:17px; color:var(--paper); line-height:1.7; }
   .ov-label{ display:block; font-size:14px; color:var(--muted); margin:18px 0 6px; }
@@ -780,6 +793,7 @@ function showLateStartForm(){
 //   - 休憩時間は入力しない（GAS側で勤務イベントの空白から自動計算）
 // =====================================================================
 function showCheckoutForm(){
+  setCardWide(true);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
   const slotButtons = LESSON_SLOTS.map(s =>
     `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`
@@ -788,30 +802,37 @@ function showCheckoutForm(){
     `<button type="button" class="tag-btn" data-type="${escapeHtml(t)}">${escapeHtml(t)}</button>`
   ).join('');
   ovBodyEl.innerHTML = `
-    <div class="ov-note">退勤時間：${fmtTime(scanTime)}<br>
-    業務開始時間・業務終了時間・休憩時間は、実施コマと事務時間から自動で計算されます。</div>
-    <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）</label>
-    <div class="slot-grid" id="slot-grid">${slotButtons}</div>
-    <label class="ov-label">事務時間①（任意）</label>
-    <div class="jimu-row">
-      ${optTimeFieldHtml('in-jimu1-start')}
-      <span class="tilde">〜</span>
-      ${optTimeFieldHtml('in-jimu1-end')}
-      <button type="button" class="mini-clear" id="btn-clear-jimu1">クリア</button>
+    <div style="text-align:center;color:var(--muted);font-size:14px;margin-bottom:2px;">
+      退勤時間 ${fmtTime(scanTime)}｜業務開始・終了・休憩時間は自動計算されます
     </div>
-    <label class="ov-label">事務時間②（任意）</label>
-    <div class="jimu-row">
-      ${optTimeFieldHtml('in-jimu2-start')}
-      <span class="tilde">〜</span>
-      ${optTimeFieldHtml('in-jimu2-end')}
-      <button type="button" class="mini-clear" id="btn-clear-jimu2">クリア</button>
+    <div class="co-cols">
+      <div class="co-col">
+        <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）</label>
+        <div class="slot-grid" id="slot-grid">${slotButtons}</div>
+      </div>
+      <div class="co-col">
+        <label class="ov-label">事務時間①（任意）</label>
+        <div class="jimu-row">
+          ${optTimeFieldHtml('in-jimu1-start')}
+          <span class="tilde">〜</span>
+          ${optTimeFieldHtml('in-jimu1-end')}
+          <button type="button" class="mini-clear" id="btn-clear-jimu1">クリア</button>
+        </div>
+        <label class="ov-label">事務時間②（任意）</label>
+        <div class="jimu-row">
+          ${optTimeFieldHtml('in-jimu2-start')}
+          <span class="tilde">〜</span>
+          ${optTimeFieldHtml('in-jimu2-end')}
+          <button type="button" class="mini-clear" id="btn-clear-jimu2">クリア</button>
+        </div>
+        <label class="ov-label">事務作業内容（事務時間を入力した場合は必須）</label>
+        <div class="tag-grid" id="jimu-type-grid">${typeButtons}</div>
+        <label class="ov-check">
+          <input type="checkbox" id="in-comiru">
+          Comiru報告書を提出済み
+        </label>
+      </div>
     </div>
-    <label class="ov-label">事務作業内容（事務時間を入力した場合は必須）</label>
-    <div class="tag-grid" id="jimu-type-grid">${typeButtons}</div>
-    <label class="ov-check">
-      <input type="checkbox" id="in-comiru">
-      Comiru報告書を提出済み
-    </label>
     <div class="ov-error" id="err-checkout"></div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
@@ -977,6 +998,7 @@ async function submitCheckout(slots, jimu, types, comiruDone){
 // 画面: 結果表示
 // =====================================================================
 function showResult(json, kind){
+  setCardWide(false);
   ovTeacherEl.textContent = '';
   if (json && json.ok){
     if (kind === 'late'){
@@ -1056,8 +1078,13 @@ function showErrorScreen(message){
 // =====================================================================
 function openOverlay(){ overlayEl.classList.add('show'); }
 function closeOverlay(){ overlayEl.classList.remove('show'); }
+// 退勤フォームだけカードをワイド2カラムにする
+function setCardWide(on){
+  document.querySelector('#overlay .card').classList.toggle('wide', !!on);
+}
 function resetToIdle(){
   closeOverlay();
+  setCardWide(false);
   wheelEl.classList.remove('show');
   currentTeacher = null;
   scanTime = null;
