@@ -941,11 +941,7 @@ async function showCheckoutForm(){
           ${optTimeFieldHtml('in-jimu2-end')}
           <button type="button" class="mini-clear" id="btn-clear-jimu2">クリア</button>
         </div>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px;">
-          ※事務時間は5分単位・出勤〜退勤（${jimuRange}）の範囲で入力します。<br>
-          ※1分単位の調整が必要な場合は、登録後に管理者へお伝えください。
-        </div>
-        <label class="ov-label">事務作業内容（事務時間を入力すると選択できます・入力した場合は必須）</label>
+        <label class="ov-label">事務作業内容</label>
         <div class="tag-grid" id="jimu-type-grid">${typeButtons}</div>
       </div>
     </div>
