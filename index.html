@@ -129,6 +129,8 @@
     font-family:'Noto Sans JP',sans-serif; text-align:center;
   }
   .tag-btn.on{ background:var(--teal); border-color:var(--teal); color:#04211d; font-weight:700; }
+  /* 事務時間が未入力のあいだは事務作業内容を選択不可にする */
+  .tag-btn:disabled{ opacity:.32; cursor:not-allowed; }
   /* 事務時間の行（開始〜終了＋クリア） */
   .jimu-row{ display:flex; align-items:center; gap:8px; }
   .jimu-row .tilde{ color:var(--muted); font-size:18px; flex:0 0 auto; }
@@ -375,19 +377,29 @@ function openWheel(title, cols, onConfirm){
   };
   wheelCancelEl.onclick = function(){ wheelEl.classList.remove('show'); };
 }
-// 時間ホイール（時・分）。min/max（HHMM）を外れたら範囲内へ丸める。
-function openTimeWheel(initial, min, max, title, onConfirm){
+// 時間ホイール（時・分）。min/max（HH:MM）を渡すと、
+// 範囲外の「時」はそもそもホイールに表示されず、範囲外の組み合わせは範囲内に丸められる。
+// （事務時間は出勤時間〜退勤時間の範囲だけ選択できる）
+// minuteStep を指定すると分をその刻みで表示（事務時間は5分刻み）。
+function openTimeWheel(initial, min, max, title, onConfirm, minuteStep){
+  const step = minuteStep || 1;
+  const minT = (min != null) ? hm2min(min) : 0;
+  const maxT = (max != null) ? hm2min(max) : 23 * 60 + 59;
+  const minH = Math.floor(minT / 60);
+  const maxH = Math.floor(maxT / 60);
   const parts = (initial || '00:00').split(':');
-  const h = Math.max(0, Math.min(23, parseInt(parts[0], 10) || 0));
+  let h = Math.max(0, Math.min(23, parseInt(parts[0], 10) || 0));
   const m = Math.max(0, Math.min(59, parseInt(parts[1], 10) || 0));
-  const hours = []; for (let i = 0; i < 24; i++) hours.push(pad2(i));
-  const mins = []; for (let i = 0; i < 60; i++) mins.push(pad2(i));
+  h = Math.max(minH, Math.min(maxH, h));
+  const hours = []; for (let i = minH; i <= maxH; i++) hours.push(pad2(i));
+  const mins = []; for (let i = 0; i < 60; i += step) mins.push(pad2(i));
+  const mIdx = Math.max(0, Math.min(mins.length - 1, Math.round(m / step)));
   openWheel(title || '時間を選択',
-    [{ values: hours, initialIndex: h }, { values: mins, initialIndex: m }],
+    [{ values: hours, initialIndex: h - minH }, { values: mins, initialIndex: mIdx }],
     function(idxs){
-      let total = idxs[0] * 60 + idxs[1];
-      if (min != null){ const t = hm2min(min); if (total < t) total = t; }
-      if (max != null){ const t = hm2min(max); if (total > t) total = t; }
+      let total = (minH + idxs[0]) * 60 + Number(mins[idxs[1]]);
+      if (total < minT) total = minT;
+      if (total > maxT) total = maxT;
       onConfirm(pad2(Math.floor(total / 60)) + ':' + pad2(total % 60));
     });
 }
@@ -416,16 +428,19 @@ function optTimeFieldHtml(fieldId){
          '</div>' +
          '<input type="hidden" id="' + fieldId + '" value="">';
 }
-function attachOptTimeField(fieldId, title){
+function attachOptTimeField(fieldId, title, onChange, min, max){
   const field = document.getElementById(fieldId + '-field');
   const hidden = document.getElementById(fieldId);
   field.onclick = function(){
-    openTimeWheel(hidden.value || toHHMM(scanTime), null, null, title, function(v){
+    // 事務時間は5分刻みで入力（1分単位の調整は登録後に管理者へ依頼）
+    // min/max = 出勤時間〜退勤時間。範囲外はそもそも選択できない。
+    openTimeWheel(hidden.value || toHHMM(scanTime), min, max, title, function(v){
       hidden.value = v;
       const val = field.querySelector('.tf-val');
       val.textContent = v;
       val.style.color = '';
-    });
+      if (onChange) onChange();
+    }, 5);
   };
 }
 function clearOptTimeField(fieldId){
@@ -635,15 +650,16 @@ function showCheckinForm(){
 function showLateMinutesForm(){
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（遅刻）';
   ovBodyEl.innerHTML = `
-    <label class="ov-label">遅刻分（授業開始時刻から何分遅れたか）</label>
-    ${numberFieldHtml('in-late-min', 1, '分')}
+    <label class="ov-label">遅刻分（授業開始時刻から何分遅れたか・5分単位）</label>
+    ${numberFieldHtml('in-late-min', 5, '分')}
     <div class="ov-error" id="err-late-min"></div>
     <div class="ov-actions">
       <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
       <button class="btn btn-primary" id="btn-next">次へ</button>
     </div>
   `;
-  attachNumberField('in-late-min', 1, 180, 1, '分', '遅刻分を選択');
+  // 遅刻分は5分単位（5〜180分）。5分＝「5分以内」の扱いで代講なし。
+  attachNumberField('in-late-min', 5, 180, 5, '分', '遅刻分を選択（5分単位）');
   document.getElementById('btn-cancel').onclick = resetToIdle;
   document.getElementById('btn-next').onclick = () => {
     const val = parseInt(document.getElementById('in-late-min').value, 10);
@@ -834,13 +850,22 @@ function showLateStartForm(){
       summary += `<br>代講コマ：${labels.map(escapeHtml).join('、')}`;
     }
   }
+  // 代講対応のときは「代講コマのみの日は出退勤不要」の注意喚起を表示
+  const isDaiko = (lateState.lateResponse === '代講対応');
+  const daikoWarn = isDaiko ? `
+    <div class="ov-note warn"><b>【確認】本日の予定が「代講になったコマ」のみの場合は、出退勤の打刻は不要です。</b><br>
+    その場合は「登録しない」を押して終了してください。<br>
+    他に担当するコマや事務作業がある場合のみ、その集計のために出勤登録を続けてください。<br>
+    ※代講になったコマは、退勤時の実施コマとしては選択できません。</div>
+  ` : '';
   ovBodyEl.innerHTML = `
     <div class="ov-note">${summary}</div>
+    ${daikoWarn}
     <div class="ov-note">出勤時間：${fmtTime(scanTime)}<br>
     業務開始時間・業務終了時間は、退勤時に実施コマ・事務時間から自動で登録されます。</div>
     <div class="ov-actions">
-      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
-      <button class="btn btn-primary" id="btn-submit">登録する</button>
+      <button class="btn btn-ghost" id="btn-cancel">${isDaiko ? '登録しない（代講コマのみ）' : 'キャンセル'}</button>
+      <button class="btn btn-primary" id="btn-submit">${isDaiko ? '登録する（他のコマ・事務がある）' : '登録する'}</button>
     </div>
   `;
   document.getElementById('btn-cancel').onclick = resetToIdle;
@@ -871,6 +896,10 @@ async function showCheckoutForm(){
     return;
   }
   const subSlots = pre.substituteSlots || [];
+  // 事務時間の選択範囲 = 出勤時間〜退勤（QR読み取り）時間
+  const jimuMin = pre.checkinTime ? toHHMM(new Date(pre.checkinTime)) : null;
+  const jimuMax = toHHMM(scanTime);
+  const jimuRange = (jimuMin ? jimuMin : '') + '〜' + jimuMax;
   const nowMin = scanTime.getHours() * 60 + scanTime.getMinutes();
   const slotButtons = LESSON_SLOTS.map(function(s){
     const isSub = subSlots.indexOf(s.key) >= 0;
@@ -883,8 +912,9 @@ async function showCheckoutForm(){
     }
     return `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`;
   }).join('');
+  // 事務作業内容は、事務時間が入力されるまで選択不可（disabled）で表示する
   const typeButtons = JIMU_TYPE_OPTIONS.map(t =>
-    `<button type="button" class="tag-btn" data-type="${escapeHtml(t)}">${escapeHtml(t)}</button>`
+    `<button type="button" class="tag-btn" data-type="${escapeHtml(t)}" disabled>${escapeHtml(t)}</button>`
   ).join('');
   ovBodyEl.innerHTML = `
     <div style="text-align:center;color:var(--muted);font-size:14px;margin-bottom:2px;">
@@ -911,7 +941,11 @@ async function showCheckoutForm(){
           ${optTimeFieldHtml('in-jimu2-end')}
           <button type="button" class="mini-clear" id="btn-clear-jimu2">クリア</button>
         </div>
-        <label class="ov-label">事務作業内容（事務時間を入力した場合は必須）</label>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px;">
+          ※事務時間は5分単位・出勤〜退勤（${jimuRange}）の範囲で入力します。<br>
+          ※1分単位の調整が必要な場合は、登録後に管理者へお伝えください。
+        </div>
+        <label class="ov-label">事務作業内容（事務時間を入力すると選択できます・入力した場合は必須）</label>
         <div class="tag-grid" id="jimu-type-grid">${typeButtons}</div>
       </div>
     </div>
@@ -921,17 +955,34 @@ async function showCheckoutForm(){
       <button class="btn btn-primary" id="btn-submit">登録する</button>
     </div>
   `;
-  attachOptTimeField('in-jimu1-start', '事務時間① 開始');
-  attachOptTimeField('in-jimu1-end', '事務時間① 終了');
-  attachOptTimeField('in-jimu2-start', '事務時間② 開始');
-  attachOptTimeField('in-jimu2-end', '事務時間② 終了');
+  // 事務時間の入力状況に応じて、事務作業内容ボタンの有効/無効を切り替える
+  function jimuTimeEntered(){
+    const j1s = document.getElementById('in-jimu1-start').value;
+    const j1e = document.getElementById('in-jimu1-end').value;
+    const j2s = document.getElementById('in-jimu2-start').value;
+    const j2e = document.getElementById('in-jimu2-end').value;
+    return !!((j1s && j1e) || (j2s && j2e));
+  }
+  function updateJimuTypeState(){
+    const enabled = jimuTimeEntered();
+    ovBodyEl.querySelectorAll('#jimu-type-grid .tag-btn').forEach(function(btn){
+      btn.disabled = !enabled;
+      if (!enabled) btn.classList.remove('on'); // 事務時間を消したら選択も解除
+    });
+  }
+  attachOptTimeField('in-jimu1-start', '事務時間① 開始（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
+  attachOptTimeField('in-jimu1-end', '事務時間① 終了（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
+  attachOptTimeField('in-jimu2-start', '事務時間② 開始（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
+  attachOptTimeField('in-jimu2-end', '事務時間② 終了（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
   document.getElementById('btn-clear-jimu1').onclick = function(){
     clearOptTimeField('in-jimu1-start');
     clearOptTimeField('in-jimu1-end');
+    updateJimuTypeState();
   };
   document.getElementById('btn-clear-jimu2').onclick = function(){
     clearOptTimeField('in-jimu2-start');
     clearOptTimeField('in-jimu2-end');
+    updateJimuTypeState();
   };
   ovBodyEl.querySelectorAll('#slot-grid .slot-btn').forEach(function(btn){
     if (btn.disabled) return;
@@ -1058,6 +1109,7 @@ async function submitLate(){
 }
 async function submitCheckout(slots, jimu, types){
   ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  const jimuEntered = !!((jimu.j1s && jimu.j1e) || (jimu.j2s && jimu.j2e));
   try{
     const json = await jsonpRequest({
       type: 'checkout',
@@ -1072,7 +1124,7 @@ async function submitCheckout(slots, jimu, types){
       jimu2End: jimu.j2e || '',
       jimuTypes: types.join(',')
     });
-    showResult(json, 'checkout');
+    showResult(json, 'checkout', { jimuEntered: jimuEntered });
   } catch(err){
     showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
   }
@@ -1080,9 +1132,13 @@ async function submitCheckout(slots, jimu, types){
 // =====================================================================
 // 画面: 結果表示
 // =====================================================================
-function showResult(json, kind){
+function showResult(json, kind, extra){
   setCardWide(false);
   ovTeacherEl.textContent = '';
+  // 事務時間を入力した退勤のとき：5分単位で登録した旨の案内
+  const jimuNote = (extra && extra.jimuEntered)
+    ? '<div class="msg" style="font-size:13px;color:var(--muted);">※事務時間は5分単位で登録しました。1分単位の調整が必要な場合は管理者にお伝えください。</div>'
+    : '';
   if (json && json.ok){
     if (kind === 'late'){
       ovBodyEl.innerHTML = `
@@ -1111,6 +1167,7 @@ function showResult(json, kind){
             <div class="name">${escapeHtml(json.name)} 先生 退勤しました（管理者確認）</div>
             <div class="time">${fmtTime(new Date(json.time))}${breakInfo}</div>
             <div class="msg left">${reasons}<br><br>${escapeHtml(REVIEW_MESSAGE)}</div>
+            ${jimuNote}
           </div>
         `;
         setTimeout(resetToIdle, 9000);
@@ -1121,9 +1178,10 @@ function showResult(json, kind){
           <div class="name">${escapeHtml(json.name)} 先生 退勤しました</div>
           <div class="time">${fmtTime(new Date(json.time))}${breakInfo}</div>
           <div class="msg">${escapeHtml(pickRandom(CHECKOUT_MESSAGES))}</div>
+          ${jimuNote}
         </div>
       `;
-      setTimeout(resetToIdle, 3600);
+      setTimeout(resetToIdle, (extra && extra.jimuEntered) ? 6000 : 3600);
       return;
     }
     // 出勤
