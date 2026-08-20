@@ -117,6 +117,11 @@
     font-family:'Noto Sans JP',sans-serif; font-variant-numeric:tabular-nums; text-align:center;
   }
   .slot-btn.on{ background:var(--gold); border-color:var(--gold); color:#1c1400; font-weight:700; }
+  /* 選択不可のコマ（代講になったコマ・退勤時刻より後に終わるコマ） */
+  .slot-btn:disabled, .slot-btn.disabled{
+    opacity:.32; cursor:not-allowed; text-decoration:line-through;
+  }
+  .slot-btn .slot-sub{ display:block; font-size:11px; text-decoration:none; color:var(--orange); }
   .tag-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:4px; }
   .tag-btn{
     padding:12px 6px; border-radius:10px; border:1px solid #2c3f63;
@@ -265,6 +270,11 @@ const LESSON_SLOTS = [
   { key: '1830-1950', label: '18:30 - 19:50' },
   { key: '2000-2120', label: '20:00 - 21:20' }
 ];
+// コマkey（例 '0930-1050'）から終了時刻を「その日の分数」で返す（例 10:50 → 650）
+function slotEndMin(key){
+  const end = key.split('-')[1]; // 'HHMM'
+  return Number(end.slice(0,2)) * 60 + Number(end.slice(2));
+}
 // 事務作業内容（固定3択・自由記述なし・「その他」なし）
 const JIMU_TYPE_OPTIONS = ['定例面談', '研修', '管理者依頼事務'];
 // 講師向けランダムメッセージ
@@ -302,7 +312,7 @@ let cameraStarted = false;
 let frameCount = 0;
 let currentTeacher = null; // { id, name }
 let scanTime = null;       // QRを読み取った瞬間のDate
-let lateState = null;      // { lateMinutes, lateResponse, substituteId, substituteName }
+let lateState = null;      // { lateMinutes, lateResponse, substituteId, substituteName, substituteSlots }
 // ----- 時計 -----
 function updateClock(){
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('ja-JP', {hour12:false});
@@ -604,6 +614,7 @@ function scanFloorMinute(){
 // 画面: 出勤確認
 //   業務開始時間の入力はなし。退勤時に実施コマ・事務時間から
 //   「最初の勤務イベントの最大5分前」がGASで自動登録される。
+//   ※すでに本日の勤怠ページがある場合はGAS側で弾かれる（1日1件まで）
 // =====================================================================
 function showCheckinForm(){
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（出勤）';
@@ -640,7 +651,7 @@ function showLateMinutesForm(){
       document.getElementById('err-late-min').textContent = '1以上の数値を選択してください';
       return;
     }
-    lateState = { lateMinutes: val, lateResponse: null, substituteId: null, substituteName: null };
+    lateState = { lateMinutes: val, lateResponse: null, substituteId: null, substituteName: null, substituteSlots: [] };
     if (val <= LATE_THRESHOLD_MIN){
       showLateStartForm();       // 5分以内：代講なし
     } else {
@@ -701,6 +712,7 @@ function showLateResponseForm(){
       } else {
         lateState.substituteId = null;
         lateState.substituteName = null;
+        lateState.substituteSlots = [];
         showLateStartForm();
       }
     };
@@ -765,6 +777,42 @@ async function showSubstituteForm(){
     }
     lateState.substituteId = id;
     lateState.substituteName = sel.options[sel.selectedIndex].text;
+    showSubstituteSlotsForm();
+  };
+}
+// =====================================================================
+// 遅刻フロー ③-2(代講対応のみ): 代講になったコマを選択
+//   ここで選んだコマは、本人の退勤時には選択できなくなる。
+// =====================================================================
+function showSubstituteSlotsForm(){
+  const slotButtons = LESSON_SLOTS.map(s =>
+    `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`
+  ).join('');
+  ovBodyEl.innerHTML = `
+    <div class="ov-note warn">代講手配になったコマをすべて選択してください（代講者：${escapeHtml(lateState.substituteName)}）。<br>
+    選択したコマは、本人の退勤時の実施コマとしては選択できなくなります。</div>
+    <label class="ov-label">代講になったコマ</label>
+    <div class="slot-grid" id="sub-slot-grid">${slotButtons}</div>
+    <div class="ov-error" id="err-sub-slots"></div>
+    <div class="ov-actions">
+      <button class="btn btn-ghost" id="btn-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="btn-next">次へ</button>
+    </div>
+  `;
+  ovBodyEl.querySelectorAll('#sub-slot-grid .slot-btn').forEach(function(btn){
+    btn.onclick = function(){ btn.classList.toggle('on'); };
+  });
+  document.getElementById('btn-cancel').onclick = resetToIdle;
+  document.getElementById('btn-next').onclick = () => {
+    const slots = Array.prototype.map.call(
+      ovBodyEl.querySelectorAll('#sub-slot-grid .slot-btn.on'),
+      function(b){ return b.getAttribute('data-slot'); }
+    );
+    if (slots.length === 0){
+      document.getElementById('err-sub-slots').textContent = '代講になったコマを1つ以上選択してください';
+      return;
+    }
+    lateState.substituteSlots = slots;
     showLateStartForm();
   };
 }
@@ -778,6 +826,13 @@ function showLateStartForm(){
   } else {
     summary += `｜${escapeHtml(lateState.lateResponse)}`;
     if (lateState.substituteName) summary += `（代講者：${escapeHtml(lateState.substituteName)}）`;
+    if (lateState.substituteSlots && lateState.substituteSlots.length > 0){
+      const labels = lateState.substituteSlots.map(function(k){
+        const s = LESSON_SLOTS.find(function(x){ return x.key === k; });
+        return s ? s.label : k;
+      });
+      summary += `<br>代講コマ：${labels.map(escapeHtml).join('、')}`;
+    }
   }
   ovBodyEl.innerHTML = `
     <div class="ov-note">${summary}</div>
@@ -793,18 +848,41 @@ function showLateStartForm(){
 }
 // =====================================================================
 // 画面: 退勤フォーム
-//   - 業務開始時間・業務終了時間の入力はなし（GASが勤務イベントから自動計算：
-//     最初のイベントの最大5分前〜最後のイベントの最大5分後）
-//   - 実施コマ：時間帯ボタンで選択（常に全時間帯を表示）
+//   - 表示前にGASへ「本日の未退勤レコード」を照会（precheckout）し、
+//     代講になったコマを取得して選択不可にする
+//   - 終了時刻が退勤（QR読み取り）時刻より後のコマも選択不可
+//     （出勤前に始まったコマは遅刻の関係があるため選択可）
+//   - 業務開始時間・業務終了時間の入力はなし（GASが勤務イベントから自動計算）
 //   - 事務時間①②（任意・開始/終了）＋ 事務作業内容（事務時間入力時は必須）
 //   - 休憩時間は入力しない（GAS側で勤務イベントの空白から自動計算）
 // =====================================================================
-function showCheckoutForm(){
+async function showCheckoutForm(){
   setCardWide(true);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
-  const slotButtons = LESSON_SLOTS.map(s =>
-    `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`
-  ).join('');
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">本日の出勤記録を確認しています…</div>`;
+  let pre = null;
+  try{
+    pre = await jsonpRequest({ type: 'precheckout', teacherId: currentTeacher.id });
+  } catch(err){
+    pre = { ok: false, message: err.message || '出勤記録の確認に失敗しました' };
+  }
+  if (!pre || !pre.ok){
+    showResult({ ok: false, message: (pre && pre.message) || '出勤記録の確認に失敗しました' });
+    return;
+  }
+  const subSlots = pre.substituteSlots || [];
+  const nowMin = scanTime.getHours() * 60 + scanTime.getMinutes();
+  const slotButtons = LESSON_SLOTS.map(function(s){
+    const isSub = subSlots.indexOf(s.key) >= 0;
+    const tooLate = slotEndMin(s.key) > nowMin; // 終了が退勤時刻より後のコマは選択不可
+    if (isSub){
+      return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}<span class="slot-sub">代講対応</span></button>`;
+    }
+    if (tooLate){
+      return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}</button>`;
+    }
+    return `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`;
+  }).join('');
   const typeButtons = JIMU_TYPE_OPTIONS.map(t =>
     `<button type="button" class="tag-btn" data-type="${escapeHtml(t)}">${escapeHtml(t)}</button>`
   ).join('');
@@ -814,7 +892,8 @@ function showCheckoutForm(){
     </div>
     <div class="co-cols">
       <div class="co-col">
-        <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）</label>
+        <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）<br>
+        <span style="font-size:12px;">※薄いコマは選択できません（代講対応のコマ／まだ終了していないコマ）</span></label>
         <div class="slot-grid" id="slot-grid">${slotButtons}</div>
       </div>
       <div class="co-col">
@@ -855,6 +934,7 @@ function showCheckoutForm(){
     clearOptTimeField('in-jimu2-end');
   };
   ovBodyEl.querySelectorAll('#slot-grid .slot-btn').forEach(function(btn){
+    if (btn.disabled) return;
     btn.onclick = function(){ btn.classList.toggle('on'); };
   });
   ovBodyEl.querySelectorAll('#jimu-type-grid .tag-btn').forEach(function(btn){
@@ -865,8 +945,9 @@ function showCheckoutForm(){
     const errEl = document.getElementById('err-checkout');
     errEl.textContent = '';
     // 実施コマ（0コマも許可：事務のみ勤務の日があるため）
+    // disabled（代講・未終了）のボタンは選択できないため、ここには入らない
     const slots = Array.prototype.map.call(
-      ovBodyEl.querySelectorAll('#slot-grid .slot-btn.on'),
+      ovBodyEl.querySelectorAll('#slot-grid .slot-btn.on:not(:disabled)'),
       function(b){ return b.getAttribute('data-slot'); }
     );
     // 事務時間①②：両方入力 or 両方未入力のみ許可。終了は開始より後。
@@ -966,6 +1047,7 @@ async function submitLate(){
       params.lateResponse = lateState.lateResponse || '';
       if (lateState.lateResponse === '代講対応' && lateState.substituteId){
         params.substituteId = lateState.substituteId;
+        params.substituteSlots = (lateState.substituteSlots || []).join(',');
       }
     }
     const json = await jsonpRequest(params);
@@ -1060,7 +1142,7 @@ function showResult(json, kind){
         <div class="time">${escapeHtml((json && json.message) || '登録に失敗しました')}</div>
       </div>
     `;
-    setTimeout(resetToIdle, 3600);
+    setTimeout(resetToIdle, 5000);
   }
 }
 function showErrorScreen(message){
