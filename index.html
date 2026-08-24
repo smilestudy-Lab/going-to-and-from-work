@@ -257,6 +257,12 @@ let BRANCH_NAME = '';
 let CAMERA_FACING = localStorage.getItem(STORAGE_KEY_FACING) || 'environment';
 // 遅刻の判定しきい値（分）。5分以内は代講なし。
 const LATE_THRESHOLD_MIN = 5;
+// 出勤ボタン（遅刻ボタンを使わない通常出勤）で打刻した場合に、
+// コマの開始時刻から何分までなら遅刻ボタンなしでもそのコマを選択できるか（分）。
+// これを超えて出勤した場合、そのコマは「遅刻」ボタンから登録する必要があるため、
+// 退勤時の実施コマとしては選択できないようにする。
+// ※「遅刻」ボタンで打刻した場合はこの制限は適用しない（従来通り全コマ選択可）。
+const CHECKIN_SLOT_GRACE_MIN = 5;
 // =====================================================================
 // 実施コマ（時間帯）
 //   通常日・土日祝・講習期間で表示を分けず、常に全時間帯を表示。
@@ -276,6 +282,11 @@ const LESSON_SLOTS = [
 function slotEndMin(key){
   const end = key.split('-')[1]; // 'HHMM'
   return Number(end.slice(0,2)) * 60 + Number(end.slice(2));
+}
+// コマkey（例 '0930-1050'）から開始時刻を「その日の分数」で返す（例 09:30 → 570）
+function slotStartMin(key){
+  const start = key.split('-')[0]; // 'HHMM'
+  return Number(start.slice(0,2)) * 60 + Number(start.slice(2));
 }
 // 事務作業内容（固定3択・自由記述なし・「その他」なし）
 const JIMU_TYPE_OPTIONS = ['定例面談', '研修', '管理者依頼事務'];
@@ -877,6 +888,9 @@ function showLateStartForm(){
 //     代講になったコマを取得して選択不可にする
 //   - 終了時刻が退勤（QR読み取り）時刻より後のコマも選択不可
 //     （出勤前に始まったコマは遅刻の関係があるため選択可）
+//   - 出勤ボタン（遅刻ボタンを使わない通常出勤）の場合、コマの開始時刻から
+//     CHECKIN_SLOT_GRACE_MIN分を超えて出勤していたコマは選択不可
+//     （遅刻ボタンで打刻した場合はこの制限はなし・従来通り全コマ選択可）
 //   - 業務開始時間・業務終了時間の入力はなし（GASが勤務イベントから自動計算）
 //   - 事務時間①②（任意・開始/終了）＋ 事務作業内容（事務時間入力時は必須）
 //   - 休憩時間は入力しない（GAS側で勤務イベントの空白から自動計算）
@@ -901,14 +915,26 @@ async function showCheckoutForm(){
   const jimuMax = toHHMM(scanTime);
   const jimuRange = (jimuMin ? jimuMin : '') + '〜' + jimuMax;
   const nowMin = scanTime.getHours() * 60 + scanTime.getMinutes();
+  // 「遅刻」ボタンで打刻したかどうか（遅刻分が記録されていれば遅刻打刻）。
+  // 遅刻打刻の場合は、出勤時刻より前に始まったコマも制限なく選択できる（従来通り）。
+  const isLateCheckin = (pre.lateMinutes !== null && typeof pre.lateMinutes !== 'undefined');
+  const checkinDate = pre.checkinTime ? new Date(pre.checkinTime) : null;
+  const checkinMin = checkinDate ? (checkinDate.getHours() * 60 + checkinDate.getMinutes()) : null;
   const slotButtons = LESSON_SLOTS.map(function(s){
     const isSub = subSlots.indexOf(s.key) >= 0;
     const tooLate = slotEndMin(s.key) > nowMin; // 終了が退勤時刻より後のコマは選択不可
+    // 出勤ボタンで打刻した場合のみ：コマ開始時刻からCHECKIN_SLOT_GRACE_MIN分を超えて
+    // 出勤していたら、そのコマは選択不可（遅刻ボタンを使わなかったコマのため）
+    const missedStart = !isLateCheckin && checkinMin !== null &&
+      (checkinMin > slotStartMin(s.key) + CHECKIN_SLOT_GRACE_MIN);
     if (isSub){
       return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}<span class="slot-sub">代講対応</span></button>`;
     }
     if (tooLate){
       return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}</button>`;
+    }
+    if (missedStart){
+      return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}<span class="slot-sub">出勤遅れ</span></button>`;
     }
     return `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`;
   }).join('');
@@ -923,7 +949,7 @@ async function showCheckoutForm(){
     <div class="co-cols">
       <div class="co-col">
         <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）<br>
-        <span style="font-size:12px;">※薄いコマは選択できません（代講対応のコマ／まだ終了していないコマ）</span></label>
+        <span style="font-size:12px;">※薄いコマは選択できません（代講対応のコマ／まだ終了していないコマ／出勤ボタンで開始${CHECKIN_SLOT_GRACE_MIN}分超過後に打刻したコマ）</span></label>
         <div class="slot-grid" id="slot-grid">${slotButtons}</div>
       </div>
       <div class="co-col">
@@ -992,7 +1018,7 @@ async function showCheckoutForm(){
     const errEl = document.getElementById('err-checkout');
     errEl.textContent = '';
     // 実施コマ（0コマも許可：事務のみ勤務の日があるため）
-    // disabled（代講・未終了）のボタンは選択できないため、ここには入らない
+    // disabled（代講・未終了・出勤遅れ）のボタンは選択できないため、ここには入らない
     const slots = Array.prototype.map.call(
       ovBodyEl.querySelectorAll('#slot-grid .slot-btn.on:not(:disabled)'),
       function(b){ return b.getAttribute('data-slot'); }
