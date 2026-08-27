@@ -894,6 +894,7 @@ function showLateStartForm(){
 //   - 業務開始時間・業務終了時間の入力はなし（GASが勤務イベントから自動計算）
 //   - 事務時間①②（任意・開始/終了）＋ 事務作業内容（事務時間入力時は必須）
 //   - 休憩時間は入力しない（GAS側で勤務イベントの空白から自動計算）
+//   - 実施コマ・事務時間のどちらか一方は必須（両方未入力での送信は不可）
 // =====================================================================
 async function showCheckoutForm(){
   setCardWide(true);
@@ -1017,7 +1018,7 @@ async function showCheckoutForm(){
   document.getElementById('btn-submit').onclick = () => {
     const errEl = document.getElementById('err-checkout');
     errEl.textContent = '';
-    // 実施コマ（0コマも許可：事務のみ勤務の日があるため）
+    // 実施コマ（0コマも許可：事務のみ勤務の日があるため。ただし事務時間も0の場合は下で弾く）
     // disabled（代講・未終了・出勤遅れ）のボタンは選択できないため、ここには入らない
     const slots = Array.prototype.map.call(
       ovBodyEl.querySelectorAll('#slot-grid .slot-btn.on:not(:disabled)'),
@@ -1045,6 +1046,12 @@ async function showCheckoutForm(){
       return;
     }
     const jimuAny = (j1s && j1e) || (j2s && j2e);
+    // 実施コマ・事務時間のどちらも未入力の場合は送信不可
+    // （どちらか一方がちゃんと入力されていれば問題なし）
+    if (slots.length === 0 && !jimuAny){
+      errEl.textContent = '実施コマまたは事務時間のいずれかを入力してください（両方とも未入力では退勤登録できません）';
+      return;
+    }
     // 事務作業内容（複数選択・固定3択）
     const types = Array.prototype.map.call(
       ovBodyEl.querySelectorAll('#jimu-type-grid .tag-btn.on'),
