@@ -255,6 +255,10 @@ const STORAGE_KEY_FACING = 'smilestudy_camera_facing'; // 'environment'（外カ
 let WEBHOOK_URL = '';
 let BRANCH_NAME = '';
 let CAMERA_FACING = localStorage.getItem(STORAGE_KEY_FACING) || 'environment';
+// GASへのリクエストの待ち時間（ミリ秒）。
+// GASの起動待ちやNotionの応答が遅いときでも最後まで結果を待てるよう、60秒にしている。
+const REQUEST_TIMEOUT_MS = 60000;
+const TIMEOUT_MESSAGE = 'タイムアウトしました';
 // 遅刻の判定しきい値（分）。5分以内は代講なし。
 const LATE_THRESHOLD_MIN = 5;
 // 出勤ボタン（遅刻ボタンを使わない通常出勤）で打刻した場合に、
@@ -899,7 +903,7 @@ function showLateStartForm(){
 async function showCheckoutForm(){
   setCardWide(true);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
-  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">本日の出勤記録を確認しています…</div>`;
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">本日の出勤記録を確認しています…<br><span style="font-size:13px;">混雑時は1分ほどかかることがあります</span></div>`;
   let pre = null;
   try{
     pre = await jsonpRequest({ type: 'precheckout', teacherId: currentTeacher.id });
@@ -1070,35 +1074,66 @@ async function showCheckoutForm(){
 }
 // =====================================================================
 // 通信（JSONP）
+//   - 待ち時間は REQUEST_TIMEOUT_MS（60秒）
+//   - GASがエラー画面（HTML）を返した場合は、タイムアウトまで待たずに
+//     「サーバー側でエラー」として即座に知らせる
+//   - タイムアウト後に遅れて届いた応答はエラーにならないよう無視する
 // =====================================================================
-function jsonpRequest(params){
+function jsonpRequest(params, timeoutMs){
   return new Promise((resolve, reject) => {
     const callbackName = 'jsonp_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
     const script = document.createElement('script');
+    let done = false;
     const timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new Error('タイムアウトしました'));
-    }, 20000);
-    function cleanup(){
+      finish();
+      reject(new Error(TIMEOUT_MESSAGE));
+    }, timeoutMs || REQUEST_TIMEOUT_MS);
+    function finish(){
+      done = true;
       clearTimeout(timeoutId);
-      delete window[callbackName];
       if (script.parentNode) script.parentNode.removeChild(script);
+      // 遅れて届いた応答でエラーにならないよう空関数を残す
+      window[callbackName] = function(){};
     }
     window[callbackName] = (data) => {
-      cleanup();
+      if (done) return;
+      finish();
       resolve(data);
+    };
+    // スクリプトは読み込めたのにコールバックが呼ばれない＝GASがエラー画面を返した
+    script.onload = () => {
+      if (!done){
+        finish();
+        reject(new Error('サーバー側でエラーが発生しました（管理者はGASの「実行数」を確認してください）'));
+      }
+    };
+    script.onerror = () => {
+      if (done) return;
+      finish();
+      reject(new Error('Webhookへの接続に失敗しました。設定のURLを確認してください'));
     };
     const query = new URLSearchParams(Object.assign({}, params, { callback: callbackName })).toString();
     script.src = WEBHOOK_URL + '?' + query;
-    script.onerror = () => {
-      cleanup();
-      reject(new Error('Webhookへの接続に失敗しました。設定のURLを確認してください'));
-    };
     document.body.appendChild(script);
   });
 }
+// 登録系の通信エラー時に表示するメッセージ。
+// タイムアウトの場合、GAS側では登録が完了していることがあるため、確認方法を案内する。
+function submitErrorMessage(err, kind){
+  if (err && err.message === TIMEOUT_MESSAGE){
+    if (kind === 'checkout'){
+      return '応答がタイムアウトしました。退勤は記録されている可能性があります。もう一度QRを読み取って「退勤」を押し、「すでに退勤済み」と表示されれば登録は完了しています。';
+    }
+    return '応答がタイムアウトしました。出勤は記録されている可能性があります。もう一度QRを読み取って「出勤」を押し、「すでに出勤済み」と表示されれば登録は完了しています。';
+  }
+  return (err && err.message) || '通信エラーです。もう一度お試しください。';
+}
+// 登録中の表示（混雑時は時間がかかる旨を案内）
+function showSubmitting(){
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…<br><span style="font-size:13px;">混雑時は1分ほどかかることがあります。画面を閉じずにお待ちください</span></div>`;
+}
 async function submitCheckin(){
-  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  showSubmitting();
   try{
     const json = await jsonpRequest({
       type: 'checkin',
@@ -1109,11 +1144,11 @@ async function submitCheckin(){
     });
     showResult(json, 'checkin');
   } catch(err){
-    showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
+    showResult({ ok:false, message: submitErrorMessage(err, 'checkin') });
   }
 }
 async function submitLate(){
-  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  showSubmitting();
   try{
     const params = {
       type: 'late',
@@ -1133,11 +1168,11 @@ async function submitLate(){
     const json = await jsonpRequest(params);
     showResult(json, 'late');
   } catch(err){
-    showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
+    showResult({ ok:false, message: submitErrorMessage(err, 'late') });
   }
 }
 async function submitCheckout(slots, jimu, types){
-  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">登録しています…</div>`;
+  showSubmitting();
   const jimuEntered = !!((jimu.j1s && jimu.j1e) || (jimu.j2s && jimu.j2e));
   try{
     const json = await jsonpRequest({
@@ -1155,7 +1190,7 @@ async function submitCheckout(slots, jimu, types){
     });
     showResult(json, 'checkout', { jimuEntered: jimuEntered });
   } catch(err){
-    showResult({ ok:false, message: err.message || '通信エラーです。もう一度お試しください。' });
+    showResult({ ok:false, message: submitErrorMessage(err, 'checkout') });
   }
 }
 // =====================================================================
@@ -1223,13 +1258,15 @@ function showResult(json, kind, extra){
     `;
     setTimeout(resetToIdle, 3600);
   } else {
+    // タイムアウト案内など長めのメッセージは読み切れるよう表示時間を延ばす
+    const errMsg = (json && json.message) || '登録に失敗しました';
     ovBodyEl.innerHTML = `
       <div class="ov-result error">
         <div class="name">エラー</div>
-        <div class="time">${escapeHtml((json && json.message) || '登録に失敗しました')}</div>
+        <div class="time">${escapeHtml(errMsg)}</div>
       </div>
     `;
-    setTimeout(resetToIdle, 5000);
+    setTimeout(resetToIdle, errMsg.length > 60 ? 9000 : 5000);
   }
 }
 function showErrorScreen(message){
