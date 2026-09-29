@@ -252,6 +252,10 @@
 const STORAGE_KEY_WEBHOOK = 'smilestudy_webhook_url';
 const STORAGE_KEY_BRANCH = 'smilestudy_branch_name';
 const STORAGE_KEY_FACING = 'smilestudy_camera_facing'; // 'environment'（外カメ） or 'user'（内カメ）
+// 出勤中の先生の勤怠ページ情報（この端末に保存）。
+// 退勤ボタンを押したときのGASへの照会（勤怠DBの検索）を省くために使う。
+// 形式: { [teacherId]: { date:'YYYY-MM-DD', pageId, checkinTime, lateMinutes, substituteSlots } }
+const STORAGE_KEY_SESSIONS = 'smilestudy_open_sessions';
 let WEBHOOK_URL = '';
 let BRANCH_NAME = '';
 let CAMERA_FACING = localStorage.getItem(STORAGE_KEY_FACING) || 'environment';
@@ -310,6 +314,44 @@ const LATE_ADMIN_MESSAGE =
 const REVIEW_MESSAGE =
   '勤怠は提出できましたが、管理者確認が必要です。管理者確認が完了するまで給与計算への反映は保留されます。管理者に確認をお願いします。';
 function pickRandom(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
+// =====================================================================
+// 出勤中セッションの保存（この端末のlocalStorage）
+//   出勤・遅刻の登録成功時に保存し、退勤時はこれを使ってすぐにフォームを出す。
+//   保存がない・日付が違う場合は、従来どおりGASへ照会する。
+//   ※登録時はGASがNotionのページを直接読み直して検証するため、
+//     ここの情報が古くても誤登録にはならない。
+// =====================================================================
+function todayKey(){
+  const d = new Date();
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+function loadSessions(){
+  try{
+    const all = JSON.parse(localStorage.getItem(STORAGE_KEY_SESSIONS) || '{}') || {};
+    // 今日以外のものは捨てる
+    const today = todayKey();
+    Object.keys(all).forEach(function(k){ if (!all[k] || all[k].date !== today) delete all[k]; });
+    return all;
+  } catch(e){
+    return {};
+  }
+}
+function saveSessions(all){
+  try{ localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(all)); } catch(e){}
+}
+function saveOpenSession(teacherId, info){
+  const all = loadSessions();
+  all[teacherId] = Object.assign({ date: todayKey() }, info);
+  saveSessions(all);
+}
+function getOpenSession(teacherId){
+  return loadSessions()[teacherId] || null;
+}
+function clearOpenSession(teacherId){
+  const all = loadSessions();
+  delete all[teacherId];
+  saveSessions(all);
+}
 // ----- DOM参照 -----
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -903,18 +945,31 @@ function showLateStartForm(){
 async function showCheckoutForm(){
   setCardWide(true);
   ovTeacherEl.textContent = currentTeacher.name + ' 先生（退勤）';
-  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">本日の出勤記録を確認しています…<br><span style="font-size:13px;">混雑時は1分ほどかかることがあります</span></div>`;
+  // この端末で出勤を記録していれば、GASへ照会せずにすぐフォームを出す
   let pre = null;
-  try{
-    pre = await jsonpRequest({ type: 'precheckout', teacherId: currentTeacher.id });
-  } catch(err){
-    pre = { ok: false, message: err.message || '出勤記録の確認に失敗しました' };
+  const cached = getOpenSession(currentTeacher.id);
+  if (cached && cached.pageId){
+    pre = {
+      ok: true,
+      pageId: cached.pageId,
+      substituteSlots: cached.substituteSlots || [],
+      checkinTime: cached.checkinTime || null,
+      lateMinutes: (typeof cached.lateMinutes === 'number') ? cached.lateMinutes : null
+    };
+  } else {
+    ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">本日の出勤記録を確認しています…<br><span style="font-size:13px;">混雑時は1分ほどかかることがあります</span></div>`;
+    try{
+      pre = await jsonpRequest({ type: 'precheckout', teacherId: currentTeacher.id });
+    } catch(err){
+      pre = { ok: false, message: err.message || '出勤記録の確認に失敗しました' };
+    }
   }
   if (!pre || !pre.ok){
     showResult({ ok: false, message: (pre && pre.message) || '出勤記録の確認に失敗しました' });
     return;
   }
   const subSlots = pre.substituteSlots || [];
+  const sessionPageId = pre.pageId || '';
   // 事務時間の選択範囲 = 出勤時間〜退勤（QR読み取り）時間
   const jimuMin = pre.checkinTime ? toHHMM(new Date(pre.checkinTime)) : null;
   const jimuMax = toHHMM(scanTime);
@@ -1069,7 +1124,7 @@ async function showCheckoutForm(){
       errEl.textContent = '事務作業内容を選択した場合は、事務時間を入力してください';
       return;
     }
-    submitCheckout(slots, { j1s, j1e, j2s, j2e }, types);
+    submitCheckout(slots, { j1s, j1e, j2s, j2e }, types, sessionPageId);
   };
 }
 // =====================================================================
@@ -1142,6 +1197,11 @@ async function submitCheckin(){
       branch: BRANCH_NAME,
       scanTime: scanTime.toISOString()
     });
+    if (json && json.ok && json.pageId){
+      saveOpenSession(currentTeacher.id, {
+        pageId: json.pageId, checkinTime: scanTime.toISOString(), lateMinutes: null, substituteSlots: []
+      });
+    }
     showResult(json, 'checkin');
   } catch(err){
     showResult({ ok:false, message: submitErrorMessage(err, 'checkin') });
@@ -1166,12 +1226,18 @@ async function submitLate(){
       }
     }
     const json = await jsonpRequest(params);
+    if (json && json.ok && json.pageId){
+      saveOpenSession(currentTeacher.id, {
+        pageId: json.pageId, checkinTime: scanTime.toISOString(),
+        lateMinutes: lateState.lateMinutes, substituteSlots: json.substituteSlots || []
+      });
+    }
     showResult(json, 'late');
   } catch(err){
     showResult({ ok:false, message: submitErrorMessage(err, 'late') });
   }
 }
-async function submitCheckout(slots, jimu, types){
+async function submitCheckout(slots, jimu, types, pageId){
   showSubmitting();
   const jimuEntered = !!((jimu.j1s && jimu.j1e) || (jimu.j2s && jimu.j2e));
   try{
@@ -1181,6 +1247,7 @@ async function submitCheckout(slots, jimu, types){
       teacherName: currentTeacher.name,
       branch: BRANCH_NAME,
       scanTime: scanTime.toISOString(),
+      pageId: pageId || '',
       lessonSlots: slots.join(','),
       jimu1Start: jimu.j1s || '',
       jimu1End: jimu.j1e || '',
@@ -1188,10 +1255,46 @@ async function submitCheckout(slots, jimu, types){
       jimu2End: jimu.j2e || '',
       jimuTypes: types.join(',')
     });
+    // 退勤できた・すでに退勤済み・その他のエラーのいずれでも保存情報は消す
+    // （エラー時は次回、GASへ照会して最新の出勤記録でフォームを出し直すため）
+    if (json) clearOpenSession(currentTeacher.id);
     showResult(json, 'checkout', { jimuEntered: jimuEntered });
   } catch(err){
+    if (err && err.message === TIMEOUT_MESSAGE){
+      // タイムアウトでも、GAS側では登録が完了していることが多い。
+      // 先生にQRを読み直してもらう代わりに、ここで自動的に登録状況を確認する。
+      await confirmCheckoutAfterTimeout(err);
+      return;
+    }
     showResult({ ok:false, message: submitErrorMessage(err, 'checkout') });
   }
+}
+// 退勤登録がタイムアウトしたあと、本当に登録されたかをGASに確認する
+//   - 退勤済み → 「退勤しました」を表示（先生は何もしなくてよい）
+//   - まだ未退勤 → 登録されていないので、もう一度退勤するよう案内
+//   - 確認もできない → 従来どおり「記録されている可能性があります」と案内
+async function confirmCheckoutAfterTimeout(originalErr){
+  const teacherName = currentTeacher.name;
+  ovBodyEl.innerHTML = `<div style="text-align:center;color:var(--muted);">応答が遅れています。登録されたか確認しています…<br><span style="font-size:13px;">画面を閉じずにお待ちください</span></div>`;
+  // GAS側の処理がまだ終わっていない場合に備えて、少し間をあけて最大2回確認する
+  for (let i = 0; i < 2; i++){
+    try{
+      const pre = await jsonpRequest({ type: 'precheckout', teacherId: currentTeacher.id }, 30000);
+      if (pre && pre.alreadyCheckedOut){
+        clearOpenSession(currentTeacher.id);
+        showResult({ ok: true, name: teacherName, time: new Date().toISOString() }, 'checkout');
+        return;
+      }
+      if (pre && pre.ok && i === 1){
+        showResult({ ok:false, message: '退勤が登録されていませんでした。お手数ですが、もう一度QRを読み取って退勤してください。' });
+        return;
+      }
+    } catch(e){
+      // 確認自体に失敗した場合は次の試行へ
+    }
+    await new Promise(function(r){ setTimeout(r, 5000); });
+  }
+  showResult({ ok:false, message: submitErrorMessage(originalErr, 'checkout') });
 }
 // =====================================================================
 // 画面: 結果表示
