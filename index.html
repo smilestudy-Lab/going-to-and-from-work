@@ -491,7 +491,10 @@ function attachOptTimeField(fieldId, title, onChange, min, max){
   field.onclick = function(){
     // 事務時間は5分刻みで入力（1分単位の調整は登録後に管理者へ依頼）
     // min/max = 出勤時間〜退勤時間。範囲外はそもそも選択できない。
-    openTimeWheel(hidden.value || toHHMM(scanTime), min, max, title, function(v){
+    // title・min は関数でも渡せる（出勤記録が最新の内容に更新されたときに追従するため）
+    const ttl = (typeof title === 'function') ? title() : title;
+    const mn = (typeof min === 'function') ? min() : min;
+    openTimeWheel(hidden.value || toHHMM(scanTime), mn, max, ttl, function(v){
       hidden.value = v;
       const val = field.querySelector('.tf-val');
       val.textContent = v;
@@ -968,35 +971,45 @@ async function showCheckoutForm(){
     showResult({ ok: false, message: (pre && pre.message) || '出勤記録の確認に失敗しました' });
     return;
   }
-  const subSlots = pre.substituteSlots || [];
+  const usedCache = !!(cached && cached.pageId);
+  const teacherIdAtOpen = currentTeacher.id;
   const sessionPageId = pre.pageId || '';
-  // 事務時間の選択範囲 = 出勤時間〜退勤（QR読み取り）時間
-  const jimuMin = pre.checkinTime ? toHHMM(new Date(pre.checkinTime)) : null;
   const jimuMax = toHHMM(scanTime);
-  const jimuRange = (jimuMin ? jimuMin : '') + '〜' + jimuMax;
   const nowMin = scanTime.getHours() * 60 + scanTime.getMinutes();
-  // 「遅刻」ボタンで打刻したかどうか（遅刻分が記録されていれば遅刻打刻）。
-  // 遅刻打刻の場合は、出勤時刻より前に始まったコマも制限なく選択できる（従来通り）。
-  const isLateCheckin = (pre.lateMinutes !== null && typeof pre.lateMinutes !== 'undefined');
-  const checkinDate = pre.checkinTime ? new Date(pre.checkinTime) : null;
-  const checkinMin = checkinDate ? (checkinDate.getHours() * 60 + checkinDate.getMinutes()) : null;
+  // ---- 出勤記録（端末の記憶を使った場合、あとで最新の内容に更新されることがある）----
+  let subSlots = [];       // 代講になったコマ
+  let isLateCheckin = false; // 「遅刻」ボタンで打刻したか（遅刻分が記録されていれば遅刻打刻）
+  let checkinMin = null;   // 出勤時刻（その日の分数）
+  let jimuMin = null;      // 事務時間の選択範囲の下限（= 出勤時間）
+  function applySession(p){
+    subSlots = p.substituteSlots || [];
+    isLateCheckin = (p.lateMinutes !== null && typeof p.lateMinutes !== 'undefined');
+    const cd = p.checkinTime ? new Date(p.checkinTime) : null;
+    checkinMin = cd ? (cd.getHours() * 60 + cd.getMinutes()) : null;
+    jimuMin = cd ? toHHMM(cd) : null;
+  }
+  applySession(pre);
+  // 事務時間の選択範囲 = 出勤時間〜退勤（QR読み取り）時間
+  function jimuRange(){ return (jimuMin ? jimuMin : '') + '〜' + jimuMax; }
+  // コマごとの選択可否
+  //   - 代講になったコマ
+  //   - 終了が退勤時刻より後のコマ
+  //   - 出勤ボタンで打刻した場合のみ：コマ開始時刻からCHECKIN_SLOT_GRACE_MIN分を超えて
+  //     出勤していたコマ（遅刻ボタンを使わなかったコマのため）
+  function slotState(key){
+    if (subSlots.indexOf(key) >= 0) return { disabled: true, sub: '代講対応' };
+    if (slotEndMin(key) > nowMin) return { disabled: true, sub: '' };
+    if (!isLateCheckin && checkinMin !== null && checkinMin > slotStartMin(key) + CHECKIN_SLOT_GRACE_MIN){
+      return { disabled: true, sub: '出勤遅れ' };
+    }
+    return { disabled: false, sub: '' };
+  }
+  function slotInnerHtml(s){
+    const st = slotState(s.key);
+    return s.label + (st.sub ? `<span class="slot-sub">${st.sub}</span>` : '');
+  }
   const slotButtons = LESSON_SLOTS.map(function(s){
-    const isSub = subSlots.indexOf(s.key) >= 0;
-    const tooLate = slotEndMin(s.key) > nowMin; // 終了が退勤時刻より後のコマは選択不可
-    // 出勤ボタンで打刻した場合のみ：コマ開始時刻からCHECKIN_SLOT_GRACE_MIN分を超えて
-    // 出勤していたら、そのコマは選択不可（遅刻ボタンを使わなかったコマのため）
-    const missedStart = !isLateCheckin && checkinMin !== null &&
-      (checkinMin > slotStartMin(s.key) + CHECKIN_SLOT_GRACE_MIN);
-    if (isSub){
-      return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}<span class="slot-sub">代講対応</span></button>`;
-    }
-    if (tooLate){
-      return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}</button>`;
-    }
-    if (missedStart){
-      return `<button type="button" class="slot-btn" data-slot="${s.key}" disabled>${s.label}<span class="slot-sub">出勤遅れ</span></button>`;
-    }
-    return `<button type="button" class="slot-btn" data-slot="${s.key}">${s.label}</button>`;
+    return `<button type="button" class="slot-btn" data-slot="${s.key}"${slotState(s.key).disabled ? ' disabled' : ''}>${slotInnerHtml(s)}</button>`;
   }).join('');
   // 事務作業内容は、事務時間が入力されるまで選択不可（disabled）で表示する
   const typeButtons = JIMU_TYPE_OPTIONS.map(t =>
@@ -1006,6 +1019,7 @@ async function showCheckoutForm(){
     <div style="text-align:center;color:var(--muted);font-size:14px;margin-bottom:2px;">
       退勤時間 ${fmtTime(scanTime)}｜業務開始・終了・休憩時間は自動計算されます
     </div>
+    <div class="ov-note warn" id="co-refresh-note" style="display:none;margin-top:8px;"></div>
     <div class="co-cols">
       <div class="co-col">
         <label class="ov-label">実施コマ（実施した授業時間帯をすべて選択）<br>
@@ -1052,10 +1066,11 @@ async function showCheckoutForm(){
       if (!enabled) btn.classList.remove('on'); // 事務時間を消したら選択も解除
     });
   }
-  attachOptTimeField('in-jimu1-start', '事務時間① 開始（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
-  attachOptTimeField('in-jimu1-end', '事務時間① 終了（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
-  attachOptTimeField('in-jimu2-start', '事務時間② 開始（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
-  attachOptTimeField('in-jimu2-end', '事務時間② 終了（' + jimuRange + '）', updateJimuTypeState, jimuMin, jimuMax);
+  const getJimuMin = function(){ return jimuMin; };
+  attachOptTimeField('in-jimu1-start', function(){ return '事務時間① 開始（' + jimuRange() + '）'; }, updateJimuTypeState, getJimuMin, jimuMax);
+  attachOptTimeField('in-jimu1-end', function(){ return '事務時間① 終了（' + jimuRange() + '）'; }, updateJimuTypeState, getJimuMin, jimuMax);
+  attachOptTimeField('in-jimu2-start', function(){ return '事務時間② 開始（' + jimuRange() + '）'; }, updateJimuTypeState, getJimuMin, jimuMax);
+  attachOptTimeField('in-jimu2-end', function(){ return '事務時間② 終了（' + jimuRange() + '）'; }, updateJimuTypeState, getJimuMin, jimuMax);
   document.getElementById('btn-clear-jimu1').onclick = function(){
     clearOptTimeField('in-jimu1-start');
     clearOptTimeField('in-jimu1-end');
@@ -1066,10 +1081,52 @@ async function showCheckoutForm(){
     clearOptTimeField('in-jimu2-end');
     updateJimuTypeState();
   };
+  // 選択可否はあとで変わることがあるため、全ボタンに付けて押下時に判定する
   ovBodyEl.querySelectorAll('#slot-grid .slot-btn').forEach(function(btn){
-    if (btn.disabled) return;
-    btn.onclick = function(){ btn.classList.toggle('on'); };
+    btn.onclick = function(){ if (!btn.disabled) btn.classList.toggle('on'); };
   });
+  // ---- 端末の記憶でフォームを出した場合：裏で最新の出勤記録を確認する ----
+  //   管理者がNotionで出勤時間などを修正していた場合に、フォームを最新の内容に合わせる。
+  //   ページIDで直接取得するため、勤怠DBの検索はしない（軽い）。
+  //   確認が遅い・失敗した場合はそのまま（登録時にGASが最新の内容で検証する）。
+  if (usedCache){
+    const gridEl = document.getElementById('slot-grid');
+    const sessionSig = function(p){
+      const t = p.checkinTime ? Math.floor(new Date(p.checkinTime).getTime() / 60000) : null;
+      const late = (typeof p.lateMinutes === 'number') ? p.lateMinutes : null;
+      return JSON.stringify([t, late, (p.substituteSlots || []).slice().sort()]);
+    };
+    const before = sessionSig(pre);
+    jsonpRequest({ type: 'session', teacherId: teacherIdAtOpen, pageId: sessionPageId }, 30000).then(function(fresh){
+      // フォームがもう閉じている（登録済み・キャンセル・次の先生）なら何もしない
+      const stillOpen = gridEl.isConnected && overlayEl.classList.contains('show') &&
+        currentTeacher && currentTeacher.id === teacherIdAtOpen;
+      if (!stillOpen || !fresh || !fresh.ok) return;
+      saveOpenSession(teacherIdAtOpen, {
+        pageId: fresh.pageId, checkinTime: fresh.checkinTime,
+        lateMinutes: fresh.lateMinutes, substituteSlots: fresh.substituteSlots || []
+      });
+      if (sessionSig(fresh) === before) return; // 変更なし
+      applySession(fresh);
+      gridEl.querySelectorAll('.slot-btn').forEach(function(btn){
+        const s = LESSON_SLOTS.find(function(x){ return x.key === btn.getAttribute('data-slot'); });
+        if (!s) return;
+        const st = slotState(s.key);
+        btn.disabled = st.disabled;
+        if (st.disabled) btn.classList.remove('on');
+        btn.innerHTML = slotInnerHtml(s);
+      });
+      // 新しい出勤時間より前になった事務時間は消す
+      ['in-jimu1-start','in-jimu1-end','in-jimu2-start','in-jimu2-end'].forEach(function(id){
+        const v = document.getElementById(id).value;
+        if (v && jimuMin && hm2min(v) < hm2min(jimuMin)) clearOptTimeField(id);
+      });
+      updateJimuTypeState();
+      const note = document.getElementById('co-refresh-note');
+      note.textContent = '出勤記録が修正されていたため、最新の内容（出勤 ' + (jimuMin || '--:--') + '）に更新しました。';
+      note.style.display = '';
+    }).catch(function(){ /* 確認できなくてもフォームはそのまま使える */ });
+  }
   ovBodyEl.querySelectorAll('#jimu-type-grid .tag-btn').forEach(function(btn){
     btn.onclick = function(){ btn.classList.toggle('on'); };
   });
